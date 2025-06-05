@@ -43,12 +43,14 @@ def process_and_store(product, cursor, inserted_ids):
         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
     for variant in product.get("variants", []):
-        if variant["id"] in inserted_ids:
-            print(f"⚠️ Variante duplicata ignorata: {variant['id']}")
+        variant_id = variant["id"]
+        if variant_id in inserted_ids:
+            print(f"⚠️ Duplicato in memoria ignorato: {variant_id}")
             continue
-        inserted_ids.add(variant["id"])
+        inserted_ids.add(variant_id)
+        print(f"✅ Inserisco variante: {variant_id}")
         row = (
-            variant["id"],
+            variant_id,
             variant["title"],
             variant["sku"],
             variant["barcode"],
@@ -81,7 +83,9 @@ def main():
     skipped = 0
     inserted_ids = set()
 
+    page_count = 1
     while url:
+        print(f"🌐 Pagina {page_count} da Shopify: {url}")
         res = requests.get(url, headers=headers)
         res.raise_for_status()
         batch = res.json().get("products", [])
@@ -96,6 +100,7 @@ def main():
         link = res.headers.get("Link")
         if link and 'rel="next"' in link:
             url = link.split(";")[0].strip("<>")
+            page_count += 1
         else:
             url = None
 
