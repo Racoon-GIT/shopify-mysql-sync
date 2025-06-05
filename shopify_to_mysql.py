@@ -10,14 +10,20 @@ DB_PASS = os.getenv("DB_PASS")
 DB_NAME = os.getenv("DB_NAME")
 
 API_VERSION = "2024-04"
+LOG_FILE = "debug_log.txt"
 
 headers = {
     "X-Shopify-Access-Token": ACCESS_TOKEN,
     "Content-Type": "application/json"
 }
 
+def log(message):
+    print(message)
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(message + "\n")
+
 def drop_and_create_table(cursor):
-    print("💣 DROP + CREATE della tabella online_products...")
+    log("💣 DROP + CREATE della tabella online_products...")
     cursor.execute("DROP TABLE IF EXISTS online_products")
     cursor.execute("""
         CREATE TABLE online_products (
@@ -45,10 +51,10 @@ def process_and_store(product, cursor, inserted_ids):
     for variant in product.get("variants", []):
         variant_id = variant["id"]
         if variant_id in inserted_ids:
-            print(f"⚠️ Duplicato in memoria ignorato: {variant_id}")
+            log(f"⚠️ Duplicato in memoria ignorato: {variant_id}")
             continue
         inserted_ids.add(variant_id)
-        print(f"✅ Inserisco variante: {variant_id}")
+        log(f"✅ Inserisco variante: {variant_id}")
         row = (
             variant_id,
             variant["title"],
@@ -64,28 +70,28 @@ def process_and_store(product, cursor, inserted_ids):
         cursor.execute(insert_sql, row)
 
 def main():
-    print("🛢️ Connessione a MySQL...")
+    log("🛢️ Connessione a MySQL...")
     conn = mysql.connector.connect(
         host=DB_HOST,
         user=DB_USER,
         password=DB_PASS,
         database=DB_NAME
     )
-    print("✅ Connesso al database:", conn.database)
+    log(f"✅ Connesso al database: {conn.database}")
     cursor = conn.cursor()
 
     drop_and_create_table(cursor)
     conn.commit()
 
-    print("📦 Connessione a Shopify...")
+    log("📦 Connessione a Shopify...")
     url = f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/products.json?status=active&limit=250"
     total_variants = 0
     skipped = 0
     inserted_ids = set()
-
     page_count = 1
+
     while url:
-        print(f"🌐 Pagina {page_count} da Shopify: {url}")
+        log(f"🌐 Pagina {page_count} da Shopify: {url}")
         res = requests.get(url, headers=headers)
         res.raise_for_status()
         batch = res.json().get("products", [])
@@ -108,7 +114,10 @@ def main():
 
     cursor.close()
     conn.close()
-    print(f"✅ Completato! Varianti inserite: {total_variants} | Duplicati ignorati: {skipped}")
+    log(f"✅ Completato! Varianti inserite: {total_variants} | Duplicati ignorati: {skipped}")
 
 if __name__ == "__main__":
+    # Reset del file di log all'avvio
+    with open(LOG_FILE, "w", encoding="utf-8") as f:
+        f.write("📝 Log esecuzione Shopify → MySQL\n\n")
     main()
