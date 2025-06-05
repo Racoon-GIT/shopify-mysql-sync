@@ -48,7 +48,10 @@ def main():
         database=DB_NAME
     )
     cursor = conn.cursor()
+
+    print("🧹 Cancellazione della tabella online_products...")
     cursor.execute("DELETE FROM online_products")
+    conn.commit()  # commit subito dopo la DELETE
 
     print("📦 Connessione a Shopify...")
     url = f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/products.json?status=active&limit=250"
