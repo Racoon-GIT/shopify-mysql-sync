@@ -132,7 +132,7 @@ def main():
         conn.commit()
         next_page_url = extract_next_page_url(res.headers.get("Link"))
 
-        if not next_page_info:
+        if not next_page_url:
             break
 
         page_count += 1
