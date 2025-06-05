@@ -16,26 +16,30 @@ headers = {
     "Content-Type": "application/json"
 }
 
-def fetch_products():
-    url = f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/products.json?status=active&limit=250"
-    products = []
-    while url:
-        res = requests.get(url, headers=headers)
-        res.raise_for_status()
-        batch = res.json().get("products", [])
-        products.extend(batch)
-
-        link = res.headers.get("Link")
-        if link and 'rel="next"' in link:
-            url = link.split(";")[0].strip("<>")
-        else:
-            url = None
-    return products
+def process_and_store(product, cursor):
+    insert_sql = """
+        INSERT INTO online_products (
+            Variant_id, Variant_Title, SKU, Barcode,
+            Product_id, Product_title, Product_handle, Vendor,
+            Price, Compare_AT_Price
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """
+    for variant in product.get("variants", []):
+        row = (
+            variant["id"],
+            variant["title"],
+            variant["sku"],
+            variant["barcode"],
+            product["id"],
+            product["title"],
+            product["handle"],
+            product["vendor"],
+            variant["price"],
+            variant["compare_at_price"]
+        )
+        cursor.execute(insert_sql, row)
 
 def main():
-    print("📦 Connessione a Shopify...")
-    products = fetch_products()
-
     print("🛢️ Connessione a MySQL...")
     conn = mysql.connector.connect(
         host=DB_HOST,
@@ -44,39 +48,33 @@ def main():
         database=DB_NAME
     )
     cursor = conn.cursor()
-
-    print("🧹 Cancellazione della tabella online_products...")
     cursor.execute("DELETE FROM online_products")
 
-    print("✏️ Inserimento varianti...")
-    insert_sql = """
-        INSERT INTO online_products (
-            Variant_id, Variant_Title, SKU, Barcode,
-            Product_id, Product_title, Product_handle, Vendor,
-            Price, Compare_AT_Price
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    """
+    print("📦 Connessione a Shopify...")
+    url = f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/products.json?status=active&limit=250"
+    total_variants = 0
 
-    for product in products:
-        for variant in product.get("variants", []):
-            row = (
-                variant["id"],
-                variant["title"],
-                variant["sku"],
-                variant["barcode"],
-                product["id"],
-                product["title"],
-                product["handle"],
-                product["vendor"],
-                variant["price"],
-                variant["compare_at_price"]
-            )
-            cursor.execute(insert_sql, row)
+    while url:
+        res = requests.get(url, headers=headers)
+        res.raise_for_status()
+        batch = res.json().get("products", [])
 
-    conn.commit()
+        for product in batch:
+            process_and_store(product, cursor)
+            total_variants += len(product.get("variants", []))
+
+        # Gestione paginazione
+        link = res.headers.get("Link")
+        if link and 'rel="next"' in link:
+            url = link.split(";")[0].strip("<>")
+        else:
+            url = None
+
+        conn.commit()  # Commit dopo ogni batch
+
     cursor.close()
     conn.close()
-    print(f"✅ Completato! Totale varianti inserite: {sum(len(p['variants']) for p in products)}")
+    print(f"✅ Completato! Totale varianti inserite: {total_variants}")
 
 if __name__ == "__main__":
     main()
