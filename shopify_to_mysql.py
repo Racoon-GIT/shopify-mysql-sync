@@ -11,6 +11,7 @@ DB_PASS = os.getenv("DB_PASS")
 DB_NAME = os.getenv("DB_NAME")
 
 API_VERSION = "2024-04"
+LOG_FILE = "debug_log.txt"
 
 headers = {
     "X-Shopify-Access-Token": ACCESS_TOKEN,
@@ -19,6 +20,8 @@ headers = {
 
 def log(message):
     print(message)
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(message + "\n")
 
 def drop_and_create_table(cursor):
     log("💣 DROP + CREATE della tabella online_products...")
@@ -34,7 +37,8 @@ def drop_and_create_table(cursor):
             Product_handle VARCHAR(255),
             Vendor VARCHAR(255),
             Price VARCHAR(255),
-            Compare_AT_Price VARCHAR(255)
+            Compare_AT_Price VARCHAR(255),
+            Inventory_Item_ID BIGINT
         )
     """)
 
@@ -43,8 +47,8 @@ def process_and_store(product, cursor, inserted_ids):
         INSERT INTO online_products (
             Variant_id, Variant_Title, SKU, Barcode,
             Product_id, Product_title, Product_handle, Vendor,
-            Price, Compare_AT_Price
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            Price, Compare_AT_Price, Inventory_Item_ID
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
     inserted_count, duplicate_count = 0, 0
 
@@ -64,7 +68,8 @@ def process_and_store(product, cursor, inserted_ids):
             product["handle"],
             product["vendor"],
             variant["price"],
-            variant["compare_at_price"]
+            variant["compare_at_price"],
+            variant["inventory_item_id"]
         )
         cursor.execute(insert_sql, row)
         inserted_count += 1
@@ -106,12 +111,10 @@ def main():
     page_count = 1
 
     while True:
-        
+        url = base_url
         if next_page_info:
-            url = f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/products.json?page_info={next_page_info}"
-        else:
-            url = base_url  # include ?status=active&limit=250
-            
+            url += f"&page_info={next_page_info}"
+
         log(f"🌐 Pagina {page_count}: {url}")
         res = requests.get(url, headers=headers)
         res.raise_for_status()
