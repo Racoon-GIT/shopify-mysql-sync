@@ -1,0 +1,7 @@
+services:
+  - type: cron
+    name: shopify-sync
+    schedule: "@daily"
+    env: python
+    buildCommand: ""
+    startCommand: "python shopify_to_mysql.py"
