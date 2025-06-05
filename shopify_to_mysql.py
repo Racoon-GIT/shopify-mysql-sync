@@ -16,8 +16,8 @@ headers = {
     "Content-Type": "application/json"
 }
 
-def reset_table(cursor):
-    print("⚠️ Eseguo DROP + CREATE TABLE per forzare il reset...")
+def drop_and_create_table(cursor):
+    print("💣 DROP + CREATE della tabella online_products...")
     cursor.execute("DROP TABLE IF EXISTS online_products")
     cursor.execute("""
         CREATE TABLE online_products (
@@ -34,7 +34,7 @@ def reset_table(cursor):
         )
     """)
 
-def process_and_store(product, cursor):
+def process_and_store(product, cursor, inserted_ids):
     insert_sql = """
         INSERT INTO online_products (
             Variant_id, Variant_Title, SKU, Barcode,
@@ -43,6 +43,10 @@ def process_and_store(product, cursor):
         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
     for variant in product.get("variants", []):
+        if variant["id"] in inserted_ids:
+            print(f"⚠️ Variante duplicata ignorata: {variant['id']}")
+            continue
+        inserted_ids.add(variant["id"])
         row = (
             variant["id"],
             variant["title"],
@@ -68,18 +72,14 @@ def main():
     print("✅ Connesso al database:", conn.database)
     cursor = conn.cursor()
 
-    try:
-        print("🧹 Cancellazione della tabella online_products...")
-        cursor.execute("DELETE FROM online_products")
-        conn.commit()
-    except Exception as e:
-        print("❌ Errore durante DELETE:", e)
-        reset_table(cursor)
-        conn.commit()
+    drop_and_create_table(cursor)
+    conn.commit()
 
     print("📦 Connessione a Shopify...")
     url = f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/products.json?status=active&limit=250"
     total_variants = 0
+    skipped = 0
+    inserted_ids = set()
 
     while url:
         res = requests.get(url, headers=headers)
@@ -87,8 +87,11 @@ def main():
         batch = res.json().get("products", [])
 
         for product in batch:
-            process_and_store(product, cursor)
-            total_variants += len(product.get("variants", []))
+            before = len(inserted_ids)
+            process_and_store(product, cursor, inserted_ids)
+            after = len(inserted_ids)
+            total_variants += after - before
+            skipped += (len(product.get("variants", [])) - (after - before))
 
         link = res.headers.get("Link")
         if link and 'rel="next"' in link:
@@ -100,7 +103,7 @@ def main():
 
     cursor.close()
     conn.close()
-    print(f"✅ Completato! Totale varianti inserite: {total_variants}")
+    print(f"✅ Completato! Varianti inserite: {total_variants} | Duplicati ignorati: {skipped}")
 
 if __name__ == "__main__":
     main()
