@@ -16,6 +16,24 @@ headers = {
     "Content-Type": "application/json"
 }
 
+def reset_table(cursor):
+    print("⚠️ Eseguo DROP + CREATE TABLE per forzare il reset...")
+    cursor.execute("DROP TABLE IF EXISTS online_products")
+    cursor.execute("""
+        CREATE TABLE online_products (
+            Variant_id BIGINT PRIMARY KEY,
+            Variant_Title TEXT,
+            SKU VARCHAR(255),
+            Barcode VARCHAR(255),
+            Product_id BIGINT,
+            Product_title TEXT,
+            Product_handle VARCHAR(255),
+            Vendor VARCHAR(255),
+            Price VARCHAR(255),
+            Compare_AT_Price VARCHAR(255)
+        )
+    """)
+
 def process_and_store(product, cursor):
     insert_sql = """
         INSERT INTO online_products (
@@ -47,11 +65,17 @@ def main():
         password=DB_PASS,
         database=DB_NAME
     )
+    print("✅ Connesso al database:", conn.database)
     cursor = conn.cursor()
 
-    print("🧹 Cancellazione della tabella online_products...")
-    cursor.execute("DELETE FROM online_products")
-    conn.commit()  # commit subito dopo la DELETE
+    try:
+        print("🧹 Cancellazione della tabella online_products...")
+        cursor.execute("DELETE FROM online_products")
+        conn.commit()
+    except Exception as e:
+        print("❌ Errore durante DELETE:", e)
+        reset_table(cursor)
+        conn.commit()
 
     print("📦 Connessione a Shopify...")
     url = f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/products.json?status=active&limit=250"
@@ -66,14 +90,13 @@ def main():
             process_and_store(product, cursor)
             total_variants += len(product.get("variants", []))
 
-        # Gestione paginazione
         link = res.headers.get("Link")
         if link and 'rel="next"' in link:
             url = link.split(";")[0].strip("<>")
         else:
             url = None
 
-        conn.commit()  # Commit dopo ogni batch
+        conn.commit()
 
     cursor.close()
     conn.close()
