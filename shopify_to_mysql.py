@@ -1,6 +1,7 @@
 import requests
 import mysql.connector
 import os
+from urllib.parse import urlparse, parse_qs
 
 SHOP_DOMAIN = os.getenv("SHOPIFY_DOMAIN")
 ACCESS_TOKEN = os.getenv("SHOPIFY_TOKEN")
@@ -48,8 +49,7 @@ def process_and_store(product, cursor, inserted_ids):
             Price, Compare_AT_Price
         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
-    inserted_count = 0
-    duplicate_count = 0
+    inserted_count, duplicate_count = 0, 0
 
     for variant in product.get("variants", []):
         variant_id = variant["id"]
@@ -74,6 +74,18 @@ def process_and_store(product, cursor, inserted_ids):
 
     return inserted_count, duplicate_count
 
+def extract_next_page_info(link_header):
+    if not link_header:
+        return None
+    parts = link_header.split(",")
+    for part in parts:
+        if 'rel="next"' in part:
+            url = part.split(";")[0].strip("<> ")
+            parsed_url = urlparse(url)
+            query_params = parse_qs(parsed_url.query)
+            return query_params.get("page_info", [None])[0]
+    return None
+
 def main():
     log("🛢️ Connessione a MySQL...")
     conn = mysql.connector.connect(
@@ -89,20 +101,24 @@ def main():
     conn.commit()
 
     log("📦 Connessione a Shopify...")
-    url = f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/products.json?status=active&limit=250"
+    base_url = f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/products.json?status=active&limit=250"
+    next_page_info = None
     total_inserted = 0
     total_duplicates = 0
     inserted_ids = set()
     page_count = 1
 
-    while url:
+    while True:
+        url = base_url
+        if next_page_info:
+            url += f"&page_info={next_page_info}"
+
         log(f"🌐 Pagina {page_count}: {url}")
         res = requests.get(url, headers=headers)
         res.raise_for_status()
         batch = res.json().get("products", [])
 
-        page_inserted = 0
-        page_duplicates = 0
+        page_inserted, page_duplicates = 0, 0
 
         for product in batch:
             ins, dup = process_and_store(product, cursor, inserted_ids)
@@ -111,19 +127,17 @@ def main():
 
         total_inserted += page_inserted
         total_duplicates += page_duplicates
-
         log(f"✅ Inserite in questa pagina: {page_inserted}")
         log(f"⚠️ Duplicati ignorati in questa pagina: {page_duplicates}")
         log(f"📦 Varianti totali finora: {len(inserted_ids)}")
 
-        link = res.headers.get("Link")
-        if link and 'rel="next"' in link:
-            url = link.split(";")[0].strip("<>")
-            page_count += 1
-        else:
-            url = None
-
         conn.commit()
+        next_page_info = extract_next_page_info(res.headers.get("Link"))
+
+        if not next_page_info:
+            break
+
+        page_count += 1
 
     cursor.close()
     conn.close()
@@ -131,5 +145,5 @@ def main():
 
 if __name__ == "__main__":
     with open(LOG_FILE, "w", encoding="utf-8") as f:
-        f.write("📝 LOG ESECUZIONE SHOPIFY -> MYSQL\n\n")
+        f.write("📝 LOG ESECUZIONE SHOPIFY → MYSQL (pagination con page_info)\n\n")
     main()
