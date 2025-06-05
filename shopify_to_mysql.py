@@ -11,7 +11,6 @@ DB_PASS = os.getenv("DB_PASS")
 DB_NAME = os.getenv("DB_NAME")
 
 API_VERSION = "2024-04"
-LOG_FILE = "debug_log.txt"
 
 headers = {
     "X-Shopify-Access-Token": ACCESS_TOKEN,
@@ -20,8 +19,6 @@ headers = {
 
 def log(message):
     print(message)
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(message + "\n")
 
 def drop_and_create_table(cursor):
     log("💣 DROP + CREATE della tabella online_products...")
@@ -146,6 +143,4 @@ def main():
     log(f"🏁 Fine script. Varianti inserite: {total_inserted} | Duplicati ignorati: {total_duplicates}")
 
 if __name__ == "__main__":
-    with open(LOG_FILE, "w", encoding="utf-8") as f:
-        f.write("📝 LOG ESECUZIONE SHOPIFY → MYSQL (pagination con page_info)\n\n")
     main()
