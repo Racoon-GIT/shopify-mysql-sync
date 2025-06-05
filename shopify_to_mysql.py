@@ -76,16 +76,14 @@ def process_and_store(product, cursor, inserted_ids):
 
     return inserted_count, duplicate_count
 
-def extract_next_page_info(link_header):
+def extract_next_page_url(link_header):
     if not link_header:
         return None
     parts = link_header.split(",")
     for part in parts:
         if 'rel="next"' in part:
             url = part.split(";")[0].strip("<> ")
-            parsed_url = urlparse(url)
-            query_params = parse_qs(parsed_url.query)
-            return query_params.get("page_info", [None])[0]
+            return url
     return None
 
 def main():
@@ -104,16 +102,14 @@ def main():
 
     log("📦 Connessione a Shopify...")
     base_url = f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/products.json?status=active&limit=250"
-    next_page_info = None
+    next_page_url = None
     total_inserted = 0
     total_duplicates = 0
     inserted_ids = set()
     page_count = 1
 
     while True:
-        url = base_url
-        if next_page_info:
-            url += f"&page_info={next_page_info}"
+        url = next_page_url if next_page_url else base_url
 
         log(f"🌐 Pagina {page_count}: {url}")
         res = requests.get(url, headers=headers)
@@ -134,7 +130,7 @@ def main():
         log(f"📦 Varianti totali finora: {len(inserted_ids)}")
 
         conn.commit()
-        next_page_info = extract_next_page_info(res.headers.get("Link"))
+        next_page_url = extract_next_page_url(res.headers.get("Link"))
 
         if not next_page_info:
             break
