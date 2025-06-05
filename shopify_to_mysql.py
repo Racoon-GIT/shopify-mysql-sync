@@ -109,10 +109,10 @@ def main():
     page_count = 1
 
     while True:
-        url = base_url
-        if next_page_info:
-            url += f"&page_info={next_page_info}"
-
+       if next_page_info:
+            url = f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/products.json?page_info={next_page_info}"
+       else:
+            url = base_url  # include ?status=active&limit=250
         log(f"🌐 Pagina {page_count}: {url}")
         res = requests.get(url, headers=headers)
         res.raise_for_status()
