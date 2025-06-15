@@ -112,7 +112,7 @@ def main():
     inserted_ids, tot_ins, tot_dup = set(), 0, 0
     page = 1
 
- while True:
+while True:
         url = next_url or base_url
         log(f"🌐 Pagina {page}: {url}")
         res = requests.get(url, headers=headers); res.raise_for_status()
