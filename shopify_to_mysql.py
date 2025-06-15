@@ -112,26 +112,31 @@ def main():
     inserted_ids, tot_ins, tot_dup = set(), 0, 0
     page = 1
 
-    while True:
+ while True:
         url = next_url or base_url
         log(f"🌐 Pagina {page}: {url}")
         res = requests.get(url, headers=headers); res.raise_for_status()
         products = res.json().get("products", [])
 
         page_ins = page_dup = 0
+        filtered_not_shoe = filtered_outlet = 0          # DEBUG
+
         for p in products:
-            # ----------- FILTRI RICHIESTI -----------
             if not is_shoe(p):
-                continue                             # non è una scarpa
+                filtered_not_shoe += 1                  # DEBUG
+                continue
             if "outlet" in p["title"].lower():
-                continue                             # titolo contiene "Outlet"
-            # ----------------------------------------
+                filtered_outlet += 1                    # DEBUG
+                continue
+
             ins, dup = process_and_store(p, cursor, inserted_ids)
             page_ins += ins; page_dup += dup
 
+        # ---------- LOG DIAGNOSTICO ----------
+        log(f"✅ Inserite: {page_ins}  |  ⚠️ Duplicati: {page_dup}  |  🚫 Non-scarpe: {filtered_not_shoe}  |  🚫 Outlet: {filtered_outlet}")
+        # --------------------------------------
+
         tot_ins += page_ins; tot_dup += page_dup
-        log(f"✅ Inserite in questa pagina: {page_ins}")
-        log(f"⚠️ Duplicati ignorati: {page_dup}")
         conn.commit()
 
         next_url = extract_next_page_url(res.headers.get("Link"))
