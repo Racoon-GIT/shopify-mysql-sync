@@ -113,35 +113,35 @@ def main():
     page = 1
 
 while True:
-        url = next_url or base_url
-        log(f"🌐 Pagina {page}: {url}")
-        res = requests.get(url, headers=headers); res.raise_for_status()
-        products = res.json().get("products", [])
+    url = next_url or base_url
+    log(f"🌐 Pagina {page}: {url}")
+    res = requests.get(url, headers=headers); res.raise_for_status()
+    products = res.json().get("products", [])
 
-        page_ins = page_dup = 0
-        filtered_not_shoe = filtered_outlet = 0          # DEBUG
+    page_ins = page_dup = 0
+    filtered_not_shoe = filtered_outlet = 0          # DEBUG
 
-        for p in products:
-            if not is_shoe(p):
-                filtered_not_shoe += 1                  # DEBUG
-                continue
-            if "outlet" in p["title"].lower():
-                filtered_outlet += 1                    # DEBUG
-                continue
+    for p in products:
+        if not is_shoe(p):
+            filtered_not_shoe += 1                  # DEBUG
+            continue
+        if "outlet" in p["title"].lower():
+            filtered_outlet += 1                    # DEBUG
+            continue
 
-            ins, dup = process_and_store(p, cursor, inserted_ids)
-            page_ins += ins; page_dup += dup
+    ins, dup = process_and_store(p, cursor, inserted_ids)
+    page_ins += ins; page_dup += dup
+           
+# ---------- LOG DIAGNOSTICO ----------
+    log(f"✅ Inserite: {page_ins}  |  ⚠️ Duplicati: {page_dup}  |  🚫 Non-scarpe: {filtered_not_shoe}  |  🚫 Outlet: {filtered_outlet}")
+# --------------------------------------
 
-        # ---------- LOG DIAGNOSTICO ----------
-        log(f"✅ Inserite: {page_ins}  |  ⚠️ Duplicati: {page_dup}  |  🚫 Non-scarpe: {filtered_not_shoe}  |  🚫 Outlet: {filtered_outlet}")
-        # --------------------------------------
+    tot_ins += page_ins; tot_dup += page_dup
+    conn.commit()
 
-        tot_ins += page_ins; tot_dup += page_dup
-        conn.commit()
-
-        next_url = extract_next_page_url(res.headers.get("Link"))
-        if not next_url: break
-        page += 1
+    next_url = extract_next_page_url(res.headers.get("Link"))
+    if not next_url: break
+    page += 1
 
     cursor.close(); conn.close()
     log(f"🏁 Fine: Varianti inserite {tot_ins} | Duplicati {tot_dup}")
