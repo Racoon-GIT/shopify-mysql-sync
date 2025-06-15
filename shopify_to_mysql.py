@@ -153,4 +153,22 @@ def main() -> None:
 
         # Log di pagina con dettagli filtro
         log(
-            f"✅ Inserite: {
+            f"✅ Inserite: {page_ins}  |  ⚠️ Duplicati: {page_dup}  |  "
+            f"🚫 Non-scarpe: {filtered_not_shoe}  |  🚫 Outlet: {filtered_outlet}"
+        )
+
+        tot_ins += page_ins
+        tot_dup += page_dup
+        conn.commit()
+
+        next_url = extract_next_page_url(res.headers.get("Link"))
+        if not next_url:
+            break
+
+    cursor.close()
+    conn.close()
+    log(f"🏁 Fine: Varianti inserite {tot_ins} | Duplicati {tot_dup}")
+
+# -------------------------------------------------------------------
+if __name__ == "__main__":
+    main()
