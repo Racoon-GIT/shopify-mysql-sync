@@ -1,69 +1,53 @@
-#!/usr/bin/env python3
-# reset_variants.py
+import os
+import requests
+import json
+import mysql.connector
+from datetime import datetime
+from time import sleep
 
-import os, sys, time, json
-import requests, mysql.connector
-
-# ---------- CONFIG --------------------------------------------------
-SHOP_DOMAIN  = os.getenv("SHOPIFY_DOMAIN")
-ACCESS_TOKEN = os.getenv("SHOPIFY_TOKEN")
-DB_HOST      = os.getenv("DB_HOST")
-DB_USER      = os.getenv("DB_USER")
-DB_PASS      = os.getenv("DB_PASS")
-DB_NAME      = os.getenv("DB_NAME")
-PRODUCT_IDS  = os.getenv("PRODUCT_IDS")
-API_VERSION  = "2024-04"
+SHOP_URL = os.getenv("SHOP_URL")
+API_KEY = os.getenv("SHOPIFY_API_KEY")
+PASSWORD = os.getenv("SHOPIFY_API_PASSWORD")
+PRODUCT_IDS = os.getenv("PRODUCT_IDS")
+DB_HOST = os.getenv("DB_HOST")
+DB_PORT = os.getenv("DB_PORT", "3306")
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_NAME = os.getenv("DB_NAME")
 
 HEADERS = {
-    "X-Shopify-Access-Token": ACCESS_TOKEN,
-    "Content-Type": "application/json"
+    "Content-Type": "application/json",
+    "X-Shopify-Access-Token": PASSWORD
 }
 
-# ---------- UTILS --------------------------------------------------
-def log(msg: str) -> None:
-    ts = time.strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
+def log(msg):
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
 
-def get_variants(product_id: str) -> list:
-    res = requests.get(
-        f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/products/{product_id}/variants.json",
-        headers=HEADERS
-    )
+def get_product_variants(product_id):
+    url = f"https://{SHOP_URL}/admin/api/2024-04/products/{product_id}/variants.json"
+    res = requests.get(url, headers=HEADERS)
     res.raise_for_status()
-    return res.json().get("variants", [])
+    return res.json()["variants"]
 
-def update_variant(product_id: str, variant_id: int, payload: dict):
-    res = requests.put(
-        f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/variants/{variant_id}.json",
-        headers=HEADERS,
-        json={"variant": {"id": variant_id, **payload}}
-    )
+def delete_variant(variant_id):
+    url = f"https://{SHOP_URL}/admin/api/2024-04/variants/{variant_id}.json"
+    res = requests.delete(url, headers=HEADERS)
+    if res.status_code != 200 and res.status_code != 204:
+        log(f"⚠️ Errore eliminazione variante {variant_id}: {res.status_code} {res.text}")
+
+def create_variant(product_id, variant):
+    url = f"https://{SHOP_URL}/admin/api/2024-04/products/{product_id}/variants.json"
+    res = requests.post(url, headers=HEADERS, json={"variant": variant})
     res.raise_for_status()
-    return res.json()
+    return res.json()["variant"]
 
-def delete_variant(product_id: str, variant_id: int):
-    res = requests.delete(
-        f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/products/{product_id}/variants/{variant_id}.json",
-        headers=HEADERS
-    )
-    res.raise_for_status()
-
-def create_variant(product_id: str, payload: dict):
-    res = requests.post(
-        f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/products/{product_id}/variants.json",
-        headers=HEADERS,
-        json={"variant": payload}
-    )
-    res.raise_for_status()
-    return res.json()
-
-# ---------- DB SETUP ------------------------------------------------
 def ensure_backup_table(cursor):
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS backup_variants (
-            product_id BIGINT,
-            variant_json JSON,
-            PRIMARY KEY (product_id, JSON_UNQUOTE(JSON_EXTRACT(variant_json, '$.id')))
+            product_id BIGINT NOT NULL,
+            variant_id BIGINT NOT NULL,
+            variant_json JSON NOT NULL,
+            PRIMARY KEY (product_id, variant_id)
         )
     """)
 
@@ -72,10 +56,11 @@ def backup_variants(cursor, conn, product_id, variants):
     cursor.execute("DELETE FROM backup_variants WHERE product_id = %s", (product_id,))
     for v in variants:
         try:
+            variant_id = v.get("id")
             payload = json.dumps(v, ensure_ascii=False)
             cursor.execute(
-                "INSERT INTO backup_variants (product_id, variant_json) VALUES (%s, %s)",
-                (product_id, payload)
+                "INSERT INTO backup_variants (product_id, variant_id, variant_json) VALUES (%s, %s, %s)",
+                (product_id, variant_id, payload)
             )
         except Exception as e:
             log(f"🚨 JSON error on variant {v.get('id')}: {e}")
@@ -85,69 +70,98 @@ def backup_variants(cursor, conn, product_id, variants):
 
 def load_backup_variants(cursor, product_id) -> list:
     cursor.execute(
-        "SELECT variant_json FROM backup_variants WHERE product_id = %s ORDER BY variant_json->>'$.position'",
+        "SELECT variant_json FROM backup_variants WHERE product_id = %s ORDER BY variant_id",
         (product_id,)
     )
     return [json.loads(row[0]) for row in cursor.fetchall()]
 
-# ---------- MAIN ----------------------------------------------------
+def reset_variants(product_id):
+    log(f"📦 Elaborazione prodotto: {product_id}")
+    variants = get_product_variants(product_id)
+
+    if not variants:
+        log("⚠️ Nessuna variante trovata")
+        return
+
+    dummy_variant = variants[-1]
+    dummy_variant_id = dummy_variant["id"]
+
+    dummy_variant["option1"] = "DUMMY"
+    dummy_variant["sku"] = f"DUMMY-{dummy_variant_id}"
+    dummy_variant["price"] = "0.00"
+    dummy_variant["compare_at_price"] = None
+    dummy_variant["barcode"] = ""
+    dummy_variant["inventory_quantity"] = 0
+    dummy_variant["inventory_management"] = "shopify"
+    dummy_variant["inventory_policy"] = "deny"
+
+    url = f"https://{SHOP_URL}/admin/api/2024-04/variants/{dummy_variant_id}.json"
+    res = requests.put(url, headers=HEADERS, json={"variant": dummy_variant})
+    res.raise_for_status()
+
+    sleep(1)
+
+    variants_to_backup = [v for v in variants if v["id"] != dummy_variant_id]
+
+    conn = mysql.connector.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        database=DB_NAME
+    )
+    cur = conn.cursor()
+    ensure_backup_table(cur)
+    backup_variants(cur, conn, product_id, variants_to_backup)
+    cur.close()
+    conn.close()
+
+    for v in variants_to_backup:
+        delete_variant(v["id"])
+        sleep(0.5)
+
+    sleep(1)
+    log("🔁 Ricreazione varianti…")
+
+    conn = mysql.connector.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        database=DB_NAME
+    )
+    cur = conn.cursor()
+    variants_data = load_backup_variants(cur, product_id)
+    cur.close()
+    conn.close()
+
+    for v in variants_data:
+        v.pop("id", None)
+        v.pop("product_id", None)
+        v.pop("position", None)
+        try:
+            create_variant(product_id, v)
+            sleep(0.5)
+        except Exception as e:
+            log(f"❌ Errore: {e}")
+            log("🚨 JSON problematic content:")
+            log(json.dumps(v, indent=2))
+
+    delete_variant(dummy_variant_id)
+    log("✅ Completato")
+
 def main():
     if not PRODUCT_IDS:
         log("❌ Variabile d'ambiente PRODUCT_IDS non definita")
         return
 
-    conn = mysql.connector.connect(
-        host=DB_HOST, user=DB_USER, password=DB_PASS, database=DB_NAME
-    )
-    cur = conn.cursor()
-    ensure_backup_table(cur)
-
     for pid in PRODUCT_IDS.split(","):
         pid = pid.strip()
-        if not pid:
-            continue
+        if pid:
+            try:
+                reset_variants(pid)
+            except Exception as e:
+                log(f"❌ Errore durante l'elaborazione del prodotto {pid}: {e}")
 
-        log(f"📦 Elaborazione prodotto: {pid}")
-        try:
-            variants = get_variants(pid)
-            backup_variants(cur, conn, pid, variants)
-
-            if not variants:
-                log("⚠️ Nessuna variante trovata.")
-                continue
-
-            survivor = variants[0]
-            survivor_id = survivor["id"]
-
-            # Rinomina variante superstite
-            log("✏️  Rinomina variante superstite…")
-            dummy_data = {
-                "option1": "TO_DELETE",
-                "price": "9999.99",
-                "sku": "DUMMY-SKU-TO-DELETE",
-                "inventory_quantity": 0,
-                "inventory_management": "shopify"
-            }
-            update_variant(pid, survivor_id, dummy_data)
-
-            # Ricrea varianti
-            backup = load_backup_variants(cur, pid)
-            log("🔁 Ricreazione varianti…")
-            for v in backup:
-                v.pop("id", None)
-                v.pop("product_id", None)
-                create_variant(pid, v)
-
-            # Cancella dummy
-            log("🗑️  Eliminazione variante dummy…")
-            delete_variant(pid, survivor_id)
-
-        except Exception as e:
-            log(f"❌ Errore: {e}")
-
-    cur.close()
-    conn.close()
-
-# ---------- ENTRY POINT --------------------------------------------
 if __name__ == "__main__":
     main()
