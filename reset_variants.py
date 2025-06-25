@@ -32,7 +32,7 @@ def log(msg: str) -> None:
 # --- INPUT MANUALE --------------------------------------------------
 # Inserisci qui gli ID prodotto da ripristinare
 product_ids = [
-    "14950601294156"  # 👈 sostituisci con i tuoi
+    "14950601294156"   # 👈 sostituisci con i tuoi
 ]
 
 # --- CAMPI VARIANTI DA BACKUP ---------------------------------------
