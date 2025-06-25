@@ -28,7 +28,7 @@ def log(msg: str) -> None:
 # ---------- DB SETUP ----------------------------------------------
 DDL_BACKUP = """
 CREATE TABLE IF NOT EXISTS backup_variants (
-  variant_id BIGINT PRIMARY KEY,
+  Variant_id BIGINT PRIMARY KEY,
   product_id BIGINT,
   variant_json JSON
 )
@@ -87,7 +87,7 @@ def main():
                 v_json = json.dumps(v, ensure_ascii=False)
                 try:
                     cur.execute(
-                        "REPLACE INTO backup_variants (variant_id, product_id, variant_json) VALUES (%s, %s, %s)",
+                        "REPLACE INTO backup_variants (Variant_id, product_id, variant_json) VALUES (%s, %s, %s)",
                         (v["id"], v["product_id"], v_json)
                     )
                 except mysql.connector.Error as err:
@@ -99,7 +99,7 @@ def main():
                 delete_variant(v["id"])
 
             log("🔁 Ricreazione varianti…")
-            cur.execute("SELECT variant_json FROM backup_variants WHERE product_id = %s ORDER BY variant_id", (pid,))
+            cur.execute("SELECT variant_json FROM backup_variants WHERE product_id = %s ORDER BY Variant_id", (pid,))
             for (v_json,) in cur.fetchall():
                 v_data = json.loads(v_json)
                 fields_to_keep = {
