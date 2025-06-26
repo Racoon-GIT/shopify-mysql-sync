@@ -49,26 +49,11 @@ def connect_db():
 def ensure_temp_table(cur):
     cur.execute("""
         CREATE TEMPORARY TABLE IF NOT EXISTS variant_backup (
-    id BIGINT PRIMARY KEY,
-    title TEXT,
-    sku VARCHAR(255),
-    barcode VARCHAR(255),
-    price DECIMAL(10,2),
-    compare_at_price DECIMAL(10,2),
-    inventory_item_id BIGINT,
-    option1 VARCHAR(255),
-    option2 VARCHAR(255),
-    option3 VARCHAR(255),
-    product_id BIGINT,
-    inventory_management VARCHAR(255),
-    inventory_policy VARCHAR(255),
-    fulfillment_service VARCHAR(255),
-    taxable BOOLEAN,
-    weight DECIMAL(10,2),
-    weight_unit VARCHAR(10),
-    tax_code VARCHAR(255),
-    position INT
-)
+            id BIGINT,
+            product_id BIGINT,
+            variant_json TEXT,
+            PRIMARY KEY (product_id, id)
+        )
     """)
     cur.execute("DELETE FROM variant_backup")
 
