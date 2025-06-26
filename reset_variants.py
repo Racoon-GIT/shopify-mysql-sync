@@ -89,7 +89,7 @@ def main():
                 "INSERT INTO variant_backup (id, product_id, variant_json) VALUES (%s, %s, %s)",
                 (v["id"], product_id, json.dumps(v))
             )
-               db.commit()
+        db.commit()
 
         # Rinomina variante superstite
         if variants:
