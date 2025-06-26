@@ -86,10 +86,10 @@ def main():
         log(f"💾 Backup di {len(variants)} varianti…")
         for v in variants:
             cur.execute(
-                "INSERT INTO variant_backup (product_id, variant_json) VALUES (%s, %s)",
-                (product_id, json.dumps(v))
-            )
-        db.commit()
+    "INSERT INTO variant_backup (id, product_id, variant_json) VALUES (%s, %s, %s)",
+    (v["id"], product_id, json.dumps(v))
+)
+               db.commit()
 
         # Rinomina variante superstite
         if variants:
