@@ -1,23 +1,19 @@
 #!/usr/bin/env python3
-# shopify_to_mysql.py
-# --------------------------------------------------
-# Sincronizza le SCARPE personalizzate da Shopify a MySQL
-# Features:
-# - Incrementale (upsert)
-# - Tiene storico prezzi
-# - Aggiunge colonne 'Tags' e 'Collections'
-# - Riconosce i prodotti da tag specifici
-# - Non esclude più "Outlet"
-# - Include log dettagliati con DEBUG
-# --------------------------------------------------
+# shopify_sync_safe.py
 
-import os, sys, time
-from decimal import Decimal
-import requests, mysql.connector
+# === IMPORT DIAGNOSTICS ===
+try:
+    import os, sys, time
+    from decimal import Decimal
+    import requests
+    import mysql.connector
+except Exception as e:
+    print(f"❌ Errore fatale in fase di import: {e}", flush=True)
+    sys.exit(1)
 
-DEBUG = True  # ⇦ attiva log pagina per pagina
+DEBUG = True
 
-# ---------- CONFIG (non modificata) -----------------------------
+# === VARIABILI D'AMBIENTE ===
 SHOP_DOMAIN  = os.getenv("SHOPIFY_DOMAIN")
 ACCESS_TOKEN = os.getenv("SHOPIFY_TOKEN")
 DB_HOST      = os.getenv("DB_HOST")
@@ -31,12 +27,11 @@ HEADERS = {
     "Content-Type": "application/json"
 }
 
-# ---------- LOG UTILITY -----------------------------------------
 def log(msg: str) -> None:
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ts}] {msg}", flush=True)
 
-# ---------- DDL creazione tabelle -------------------------------
+# === CREAZIONE TABELLE ===
 DDL_ONLINE_PRODUCTS = """
 CREATE TABLE IF NOT EXISTS online_products (
   Variant_id        BIGINT PRIMARY KEY,
@@ -67,7 +62,7 @@ CREATE TABLE IF NOT EXISTS price_history (
 )
 """
 
-# ---------- FILTRO: solo se ha tag precisi ----------------------
+# === FILTRO PRODOTTI ===
 VALID_TAGS = {
     "sneakers personalizzate",
     "scarpe personalizzate",
@@ -80,7 +75,7 @@ def is_shoe(product: dict) -> bool:
     tags = [t.strip().lower() for t in tags_raw.split(",")]
     return any(tag in VALID_TAGS for tag in tags)
 
-# ---------- Shopify pagination & collections --------------------
+# === PAGINAZIONE SHOPIFY ===
 def extract_next(link_header: str | None) -> str | None:
     if not link_header:
         return None
@@ -96,7 +91,7 @@ def get_product_collections(product_id: int) -> str:
     data = res.json().get("collections", [])
     return ", ".join(c.get("title", "") for c in data)
 
-# ---------- MAIN ------------------------------------------------
+# === MAIN ===
 def main():
     log("🔌 Connessione a MySQL…")
     conn = mysql.connector.connect(
@@ -107,7 +102,6 @@ def main():
     cur.execute(DDL_PRICE_HISTORY)
     conn.commit()
 
-    # Recupera tutti gli ID attuali per rilevare le eliminazioni
     cur.execute("SELECT Variant_id FROM online_products")
     existing_ids = {row[0] for row in cur.fetchall()}
 
@@ -139,7 +133,6 @@ def main():
                 price = Decimal(v["price"] or "0")
                 compare = Decimal(v["compare_at_price"] or "0")
 
-                # Check se già esiste → storicizza prezzo se cambia
                 cur.execute("SELECT Price, Compare_AT_Price FROM online_products WHERE Variant_id=%s", (vid,))
                 row = cur.fetchone()
                 if row:
@@ -154,7 +147,6 @@ def main():
                 else:
                     ins_page += 1
 
-                # UPSERT
                 cur.execute("""
                     INSERT INTO online_products (
                       Variant_id, Variant_Title, SKU, Barcode,
@@ -184,7 +176,7 @@ def main():
                 ))
 
             conn.commit()
-            time.sleep(0.2)  # throttling
+            time.sleep(0.2)
 
         if DEBUG:
             log(f"[Pagina {page}] ➕ Insert: {ins_page} | ↺ Update: {upd_page}")
@@ -195,7 +187,6 @@ def main():
         if not next_url:
             break
 
-    # Elimina varianti non più presenti
     to_delete = existing_ids - seen_ids
     if to_delete:
         cur.execute(
@@ -209,7 +200,7 @@ def main():
     conn.close()
     log(f"✅ Sync completato. ➕ {tot_ins} insert | ↺ {tot_upd} update | Totale attuale: {len(seen_ids)}")
 
-# ---------- STARTPOINT ------------------------------------------
+# === AVVIO ===
 if __name__ == "__main__":
     try:
         main()
