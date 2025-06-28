@@ -36,9 +36,13 @@ def safe_get(url, retries=5, backoff=1.0):
     for attempt in range(retries):
         res = requests.get(url, headers=HEADERS)
         if res.status_code == 429:
-            retry_after = int(res.headers.get("Retry-After", 2))
+            retry_after_raw = res.headers.get("Retry-After", "2")
+            try:
+                retry_after = float(retry_after_raw)
+            except ValueError:
+                retry_after = 2.0
             wait = retry_after * backoff
-            log(f"⏳ Rate limit. Aspetto {wait}s...")
+            log(f"⏳ Rate limit. Aspetto {wait:.1f}s...")
             time.sleep(wait)
             continue
         res.raise_for_status()
