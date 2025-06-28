@@ -1,4 +1,5 @@
 # shopify_to_mysql.py
+#!/usr/bin/env python3
 
 try:
     import os, sys, time
@@ -29,6 +30,20 @@ HEADERS = {
 def log(msg: str) -> None:
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ts}] {msg}", flush=True)
+
+# === GESTIONE RATE LIMIT ===
+def safe_get(url, retries=5, backoff=1.0):
+    for attempt in range(retries):
+        res = requests.get(url, headers=HEADERS)
+        if res.status_code == 429:
+            retry_after = int(res.headers.get("Retry-After", 2))
+            wait = retry_after * backoff
+            log(f"⏳ Rate limit. Aspetto {wait}s...")
+            time.sleep(wait)
+            continue
+        res.raise_for_status()
+        return res
+    raise Exception(f"❌ Troppe richieste, anche dopo {retries} tentativi: {url}")
 
 # === TABELLE MYSQL ===
 DDL_ONLINE_PRODUCTS = """
@@ -90,8 +105,7 @@ def build_product_collections_map() -> dict:
     def fetch_all_collections(endpoint: str):
         url = f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/{endpoint}?limit=250"
         while url:
-            res = requests.get(url, headers=HEADERS)
-            res.raise_for_status()
+            res = safe_get(url)
             collections = res.json().get(endpoint.split(".")[0], [])
             for coll in collections:
                 coll_id = coll["id"]
@@ -99,8 +113,7 @@ def build_product_collections_map() -> dict:
                 # recupera i prodotti nella collezione
                 prod_url = f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/collections/{coll_id}/products.json?limit=250"
                 while prod_url:
-                    r = requests.get(prod_url, headers=HEADERS)
-                    r.raise_for_status()
+                    r = safe_get(prod_url)
                     for p in r.json().get("products", []):
                         product_to_collections[p["id"]].append(title)
                     prod_url = extract_next(r.headers.get("Link"))
@@ -138,8 +151,7 @@ def main():
     while True:
         url = next_url or base_url
         page += 1
-        res = requests.get(url, headers=HEADERS)
-        res.raise_for_status()
+        res = safe_get(url)
         products = res.json().get("products", [])
 
         ins_page = upd_page = 0
