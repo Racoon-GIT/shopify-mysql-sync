@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# shopify_sync_safe.py
+# shopify_to_mysql.py
 
 # === IMPORT DIAGNOSTICS ===
 try:
