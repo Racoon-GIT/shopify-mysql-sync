@@ -1,12 +1,11 @@
-#!/usr/bin/env python3
 # shopify_to_mysql.py
 
-# === IMPORT DIAGNOSTICS ===
 try:
     import os, sys, time
     from decimal import Decimal
     import requests
     import mysql.connector
+    from collections import defaultdict
 except Exception as e:
     print(f"❌ Errore fatale in fase di import: {e}", flush=True)
     sys.exit(1)
@@ -31,7 +30,7 @@ def log(msg: str) -> None:
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ts}] {msg}", flush=True)
 
-# === CREAZIONE TABELLE ===
+# === TABELLE MYSQL ===
 DDL_ONLINE_PRODUCTS = """
 CREATE TABLE IF NOT EXISTS online_products (
   Variant_id        BIGINT PRIMARY KEY,
@@ -62,7 +61,7 @@ CREATE TABLE IF NOT EXISTS price_history (
 )
 """
 
-# === FILTRO PRODOTTI ===
+# === FILTRO TAG ===
 VALID_TAGS = {
     "sneakers personalizzate",
     "scarpe personalizzate",
@@ -84,12 +83,35 @@ def extract_next(link_header: str | None) -> str | None:
             return part.split(";")[0].strip("<> ")
     return None
 
-def get_product_collections(product_id: int) -> str:
-    url = f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/products/{product_id}/collections.json"
-    res = requests.get(url, headers=HEADERS)
-    res.raise_for_status()
-    data = res.json().get("collections", [])
-    return ", ".join(c.get("title", "") for c in data)
+# === CREA MAPPA {product_id: [collection1, collection2]} ===
+def build_product_collections_map() -> dict:
+    product_to_collections = defaultdict(list)
+
+    def fetch_all_collections(endpoint: str):
+        url = f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/{endpoint}?limit=250"
+        while url:
+            res = requests.get(url, headers=HEADERS)
+            res.raise_for_status()
+            collections = res.json().get(endpoint.split(".")[0], [])
+            for coll in collections:
+                coll_id = coll["id"]
+                title = coll["title"]
+                # recupera i prodotti nella collezione
+                prod_url = f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/collections/{coll_id}/products.json?limit=250"
+                while prod_url:
+                    r = requests.get(prod_url, headers=HEADERS)
+                    r.raise_for_status()
+                    for p in r.json().get("products", []):
+                        product_to_collections[p["id"]].append(title)
+                    prod_url = extract_next(r.headers.get("Link"))
+            url = extract_next(res.headers.get("Link"))
+
+    log("🔁 Caricamento mappa collezioni da custom_collections...")
+    fetch_all_collections("custom_collections.json")
+    log("🔁 Caricamento mappa collezioni da smart_collections...")
+    fetch_all_collections("smart_collections.json")
+    log(f"✅ Mappa collezioni creata con {len(product_to_collections)} prodotti.")
+    return product_to_collections
 
 # === MAIN ===
 def main():
@@ -104,6 +126,9 @@ def main():
 
     cur.execute("SELECT Variant_id FROM online_products")
     existing_ids = {row[0] for row in cur.fetchall()}
+
+    # Costruisci la mappa collezioni
+    collection_map = build_product_collections_map()
 
     base_url = f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/products.json?status=active&limit=250"
     next_url = None
@@ -123,8 +148,8 @@ def main():
             if not is_shoe(p):
                 continue
 
-            collections = get_product_collections(p["id"])
             tags_string = p.get("tags", "")
+            collections = ", ".join(collection_map.get(p["id"], []))
 
             for v in p["variants"]:
                 vid = v["id"]
@@ -187,6 +212,7 @@ def main():
         if not next_url:
             break
 
+    # Rimozione varianti scomparse
     to_delete = existing_ids - seen_ids
     if to_delete:
         cur.execute(
@@ -200,7 +226,7 @@ def main():
     conn.close()
     log(f"✅ Sync completato. ➕ {tot_ins} insert | ↺ {tot_upd} update | Totale attuale: {len(seen_ids)}")
 
-# === AVVIO ===
+# === ENTRYPOINT ===
 if __name__ == "__main__":
     try:
         main()
