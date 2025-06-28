@@ -1,27 +1,29 @@
 #!/usr/bin/env python3
 # shopify_to_mysql.py
 # --------------------------------------------------
-# Sincronizza incrementale le varianti SCARPE da Shopify a MySQL
-# • Esclude “Outlet”
-# • Upsert su online_products (DECIMAL prezzi)
-# • Rimuove righe assenti su Shopify
-# • Logga cambi prezzo in price_history
+# Sincronizza le SCARPE personalizzate da Shopify a MySQL
+# Features:
+# - Incrementale (upsert)
+# - Tiene storico prezzi
+# - Aggiunge colonne 'Tags' e 'Collections'
+# - Riconosce i prodotti da tag specifici
+# - Non esclude più "Outlet"
+# - Include log dettagliati con DEBUG
 # --------------------------------------------------
 
 import os, sys, time
 from decimal import Decimal
 import requests, mysql.connector
 
-DEBUG = False    # ⇦ imposta a True se vuoi i contatori per pagina
+DEBUG = True  # ⇦ attiva log pagina per pagina
 
-# ---------- CONFIG -------------------------------------------------
+# ---------- CONFIG (non modificata) -----------------------------
 SHOP_DOMAIN  = os.getenv("SHOPIFY_DOMAIN")
 ACCESS_TOKEN = os.getenv("SHOPIFY_TOKEN")
 DB_HOST      = os.getenv("DB_HOST")
 DB_USER      = os.getenv("DB_USER")
 DB_PASS      = os.getenv("DB_PASS")
 DB_NAME      = os.getenv("DB_NAME")
-
 API_VERSION  = "2024-04"
 
 HEADERS = {
@@ -29,12 +31,12 @@ HEADERS = {
     "Content-Type": "application/json"
 }
 
-# ---------- LOG ----------------------------------------------------
+# ---------- LOG UTILITY -----------------------------------------
 def log(msg: str) -> None:
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{ts}] {msg}", flush=True)
 
-# ---------- DB SETUP ----------------------------------------------
+# ---------- DDL creazione tabelle -------------------------------
 DDL_ONLINE_PRODUCTS = """
 CREATE TABLE IF NOT EXISTS online_products (
   Variant_id        BIGINT PRIMARY KEY,
@@ -47,7 +49,9 @@ CREATE TABLE IF NOT EXISTS online_products (
   Vendor            VARCHAR(255),
   Price             DECIMAL(10,2),
   Compare_AT_Price  DECIMAL(10,2),
-  Inventory_Item_ID BIGINT
+  Inventory_Item_ID BIGINT,
+  Tags              TEXT,
+  Collections       TEXT
 )
 """
 
@@ -63,26 +67,20 @@ CREATE TABLE IF NOT EXISTS price_history (
 )
 """
 
-# ---------- FILTRO SCARPE -----------------------------------------
-SHOE_KW = {
-    "shoe","shoes","footwear",
-    "sneaker","sneakers",
-    "boot","boots",
-    "scarpa","scarpe",
-    "stivale","stivali",
-    "sandal","sandals"
+# ---------- FILTRO: solo se ha tag precisi ----------------------
+VALID_TAGS = {
+    "sneakers personalizzate",
+    "scarpe personalizzate",
+    "ciabatte personalizzate",
+    "stivali personalizzati"
 }
-def is_shoe(product: dict) -> bool:
-    ptype = (product.get("product_type") or "").lower()
-    pcat  = ""
-    pc_obj = product.get("product_category")
-    if isinstance(pc_obj, dict):
-        pcat = (pc_obj.get("path") or "").lower()
-    tags  = (product.get("tags") or "").replace(",", " ").lower()
-    blob  = f"{ptype} {pcat} {tags}"
-    return any(k in blob for k in SHOE_KW)
 
-# ---------- UTILS --------------------------------------------------
+def is_shoe(product: dict) -> bool:
+    tags_raw = product.get("tags", "")
+    tags = [t.strip().lower() for t in tags_raw.split(",")]
+    return any(tag in VALID_TAGS for tag in tags)
+
+# ---------- Shopify pagination & collections --------------------
 def extract_next(link_header: str | None) -> str | None:
     if not link_header:
         return None
@@ -91,120 +89,127 @@ def extract_next(link_header: str | None) -> str | None:
             return part.split(";")[0].strip("<> ")
     return None
 
-# ---------- MAIN ---------------------------------------------------
-def main() -> None:
-    # DB connect & DDL
-    log("🔌 Connessione MySQL…")
+def get_product_collections(product_id: int) -> str:
+    url = f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/products/{product_id}/collections.json"
+    res = requests.get(url, headers=HEADERS)
+    res.raise_for_status()
+    data = res.json().get("collections", [])
+    return ", ".join(c.get("title", "") for c in data)
+
+# ---------- MAIN ------------------------------------------------
+def main():
+    log("🔌 Connessione a MySQL…")
     conn = mysql.connector.connect(
         host=DB_HOST, user=DB_USER, password=DB_PASS, database=DB_NAME
     )
-    cur  = conn.cursor()
+    cur = conn.cursor()
     cur.execute(DDL_ONLINE_PRODUCTS)
     cur.execute(DDL_PRICE_HISTORY)
     conn.commit()
 
-    # Pre-carica set ID esistenti per cancellazione finale
+    # Recupera tutti gli ID attuali per rilevare le eliminazioni
     cur.execute("SELECT Variant_id FROM online_products")
     existing_ids = {row[0] for row in cur.fetchall()}
 
-    base_url = (
-        f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}"
-        "/products.json?status=active&limit=250"
-    )
+    base_url = f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/products.json?status=active&limit=250"
     next_url = None
-    page = tot_ins = 0
-    seen_ids: set[int] = set()
+    page = tot_ins = tot_upd = 0
+    seen_ids = set()
 
     while True:
         url = next_url or base_url
         page += 1
-        res = requests.get(url, headers=HEADERS); res.raise_for_status()
-        prods = res.json().get("products", [])
+        res = requests.get(url, headers=HEADERS)
+        res.raise_for_status()
+        products = res.json().get("products", [])
 
-        ins_page = upd_page = filtered_ns = filtered_out = 0
+        ins_page = upd_page = 0
 
-        for p in prods:
+        for p in products:
             if not is_shoe(p):
-                filtered_ns += 1
                 continue
-            if "outlet" in p["title"].lower():
-                filtered_out += 1
-                continue
+
+            collections = get_product_collections(p["id"])
+            tags_string = p.get("tags", "")
 
             for v in p["variants"]:
                 vid = v["id"]
                 seen_ids.add(vid)
 
-                price     = Decimal(v["price"] or "0")
-                compare   = Decimal(v["compare_at_price"] or "0")
-                # Price change check
-                cur.execute(
-                    "SELECT Price, Compare_AT_Price FROM online_products WHERE Variant_id=%s",
-                    (vid,)
-                )
+                price = Decimal(v["price"] or "0")
+                compare = Decimal(v["compare_at_price"] or "0")
+
+                # Check se già esiste → storicizza prezzo se cambia
+                cur.execute("SELECT Price, Compare_AT_Price FROM online_products WHERE Variant_id=%s", (vid,))
                 row = cur.fetchone()
                 if row:
                     old_price, old_cmp = row
                     if old_price != price or old_cmp != compare:
                         cur.execute(
-                            "INSERT INTO price_history"
-                            " (Variant_id, Old_Price, New_Price, Old_Compare_AT, New_Compare_AT)"
-                            " VALUES (%s,%s,%s,%s,%s)",
+                            "INSERT INTO price_history (Variant_id, Old_Price, New_Price, Old_Compare_AT, New_Compare_AT) "
+                            "VALUES (%s,%s,%s,%s,%s)",
                             (vid, old_price, price, old_cmp, compare)
                         )
                     upd_page += 1
                 else:
                     ins_page += 1
 
-                # Upsert
+                # UPSERT
                 cur.execute("""
-                    INSERT INTO online_products
-                    (Variant_id, Variant_Title, SKU, Barcode,
-                     Product_id, Product_title, Product_handle, Vendor,
-                     Price, Compare_AT_Price, Inventory_Item_ID)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    INSERT INTO online_products (
+                      Variant_id, Variant_Title, SKU, Barcode,
+                      Product_id, Product_title, Product_handle, Vendor,
+                      Price, Compare_AT_Price, Inventory_Item_ID,
+                      Tags, Collections
+                    )
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     ON DUPLICATE KEY UPDATE
-                       Variant_Title=VALUES(Variant_Title),
-                       SKU=VALUES(SKU),
-                       Barcode=VALUES(Barcode),
-                       Product_id=VALUES(Product_id),
-                       Product_title=VALUES(Product_title),
-                       Product_handle=VALUES(Product_handle),
-                       Vendor=VALUES(Vendor),
-                       Price=VALUES(Price),
-                       Compare_AT_Price=VALUES(Compare_AT_Price),
-                       Inventory_Item_ID=VALUES(Inventory_Item_ID)
+                      Variant_Title=VALUES(Variant_Title),
+                      SKU=VALUES(SKU),
+                      Barcode=VALUES(Barcode),
+                      Product_id=VALUES(Product_id),
+                      Product_title=VALUES(Product_title),
+                      Product_handle=VALUES(Product_handle),
+                      Vendor=VALUES(Vendor),
+                      Price=VALUES(Price),
+                      Compare_AT_Price=VALUES(Compare_AT_Price),
+                      Inventory_Item_ID=VALUES(Inventory_Item_ID),
+                      Tags=VALUES(Tags),
+                      Collections=VALUES(Collections)
                 """, (
                     vid, v["title"], v["sku"], v["barcode"],
                     p["id"], p["title"], p["handle"], p["vendor"],
-                    price, compare, v["inventory_item_id"]
+                    price, compare, v["inventory_item_id"],
+                    tags_string, collections
                 ))
 
+            conn.commit()
+            time.sleep(0.2)  # throttling
+
         if DEBUG:
-            log(f"[P{page}] +{ins_page} new | ↺ {upd_page} upd | "
-                f"🚫NS {filtered_ns} | 🚫OUT {filtered_out}")
+            log(f"[Pagina {page}] ➕ Insert: {ins_page} | ↺ Update: {upd_page}")
         tot_ins += ins_page
-        conn.commit()
+        tot_upd += upd_page
 
         next_url = extract_next(res.headers.get("Link"))
         if not next_url:
             break
 
-    # Delete variants that disappeared from Shopify
+    # Elimina varianti non più presenti
     to_delete = existing_ids - seen_ids
     if to_delete:
         cur.execute(
             f"DELETE FROM online_products WHERE Variant_id IN ({','.join(['%s']*len(to_delete))})",
             tuple(to_delete)
         )
-        log(f"🗑️  Rimossi {cur.rowcount} varianti non più presenti su Shopify")
+        log(f"🗑️  Rimossi {cur.rowcount} varianti non più su Shopify")
 
     conn.commit()
-    cur.close(); conn.close()
-    log(f"✅ Sync concluso. Insert: {tot_ins} | Upd: {len(seen_ids)-tot_ins} "
-        f"| Totale varianti in tabella: {len(seen_ids)}")
+    cur.close()
+    conn.close()
+    log(f"✅ Sync completato. ➕ {tot_ins} insert | ↺ {tot_upd} update | Totale attuale: {len(seen_ids)}")
 
-# -------------------------------------------------------------------
+# ---------- STARTPOINT ------------------------------------------
 if __name__ == "__main__":
     try:
         main()
