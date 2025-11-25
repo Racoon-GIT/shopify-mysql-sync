@@ -97,6 +97,7 @@ def ensure_temp_tables(cur):
             product_id BIGINT,
             inventory_item_id BIGINT,
             variant_json TEXT,
+            position INT,
             PRIMARY KEY (product_id, id)
         )
     """)
@@ -142,13 +143,17 @@ def main():
             log(f"❌ Errore durante l'accesso alle varianti: {e}")
             continue
 
+        if not variants:
+            log("⚠️ Nessuna variante trovata, skip prodotto")
+            continue
+
         # ===== STEP 2: BACKUP VARIANTI + INVENTORY =====
         log(f"💾 Backup varianti e inventory levels...")
-        for v in variants:
+        for idx, v in enumerate(variants):
             # Backup dati variante
             cur.execute(
-                "INSERT INTO variant_backup (id, product_id, inventory_item_id, variant_json) VALUES (%s, %s, %s, %s)",
-                (v["id"], product_id, v.get("inventory_item_id"), json.dumps(v))
+                "INSERT INTO variant_backup (id, product_id, inventory_item_id, variant_json, position) VALUES (%s, %s, %s, %s, %s)",
+                (v["id"], product_id, v.get("inventory_item_id"), json.dumps(v), idx)
             )
             
             # Backup inventory levels (solo se gestito)
@@ -163,22 +168,8 @@ def main():
         
         db.commit()
 
-        # ===== STEP 3: RINOMINA PRIMA VARIANTE COME DUMMY =====
-        if variants:
-            dummy_id = variants[0]["id"]
-            try:
-                safe_request(
-                    "PUT",
-                    f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/variants/{dummy_id}.json",
-                    headers=HEADERS,
-                    json={"variant": {"id": dummy_id, "option1": "DUMMY_TEMP_VARIANT"}}
-                )
-                log("✏️ Variante DUMMY creata")
-                time.sleep(0.6)
-            except Exception as e:
-                log(f"❌ Errore dummy update: {e}")
-
-        # ===== STEP 4: CANCELLA TUTTE LE VARIANTI TRANNE DUMMY =====
+        # ===== STEP 3: CANCELLA VARIANTI DALLA 2 ALLA N =====
+        log("🗑️ Cancellazione varianti dalla 2 alla N...")
         for v in variants[1:]:
             try:
                 safe_request(
@@ -186,28 +177,31 @@ def main():
                     f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/variants/{v['id']}.json",
                     headers=HEADERS
                 )
+                log(f"  ✅ Cancellata variante {v['id']} ({v.get('title')})")
                 time.sleep(0.6)
             except Exception as e:
                 log(f"❌ Errore delete variante {v['id']}: {e}")
 
-        log("🗑️ Varianti eliminate (eccetto dummy)")
-
-        # ===== STEP 5: RICREA VARIANTI DA BACKUP =====
+        # ===== STEP 4: RICREA VARIANTI 2-N DA BACKUP =====
+        log("🔄 Ricreazione varianti dalla 2 alla N...")
         cur.execute("""
-            SELECT id, inventory_item_id, variant_json 
+            SELECT id, inventory_item_id, variant_json, position
             FROM variant_backup 
             WHERE product_id = %s
+            ORDER BY position
         """, (product_id,))
         rows = cur.fetchall()
         
         # Mappa per tracciare old_variant_id -> new_inventory_item_id
         variant_mapping = {}
         
-        for (old_variant_id, old_inventory_item_id, variant_json) in rows:
+        # Ricrea dalla posizione 1 in poi (skip posizione 0 = prima variante)
+        for (old_variant_id, old_inventory_item_id, variant_json, position) in rows[1:]:
             v = json.loads(variant_json)
             
-            # Salta la DUMMY
-            if v["option1"] == "DUMMY_TEMP_VARIANT":
+            # FILTRO: Salta varianti con "perso" nel titolo
+            if "perso" in v.get("title", "").lower():
+                log(f"  ⏭️ Skip variante con 'perso' nel titolo: {v.get('title')}")
                 continue
             
             log(f"🔄 Ricreo variante: {v.get('option1')} / {v.get('option2')} / {v.get('option3')}")
@@ -249,7 +243,68 @@ def main():
                 log(f"❌ Errore creazione variante: {e}")
                 continue
 
-        # ===== STEP 6: RIPRISTINA INVENTORY LEVELS =====
+        # ===== STEP 5: CANCELLA LA PRIMA VARIANTE (ora possibile) =====
+        first_variant = variants[0]
+        log(f"🗑️ Cancellazione prima variante: {first_variant['id']} ({first_variant.get('title')})")
+        try:
+            safe_request(
+                "DELETE",
+                f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/variants/{first_variant['id']}.json",
+                headers=HEADERS
+            )
+            log("  ✅ Prima variante cancellata")
+            time.sleep(0.6)
+        except Exception as e:
+            log(f"❌ Errore cancellazione prima variante: {e}")
+
+        # ===== STEP 6: RICREA LA PRIMA VARIANTE DA BACKUP =====
+        log("🔄 Ricreazione prima variante...")
+        first_row = rows[0]
+        old_variant_id, old_inventory_item_id, variant_json, position = first_row
+        v = json.loads(variant_json)
+        
+        # FILTRO: Salta se contiene "perso"
+        if "perso" in v.get("title", "").lower():
+            log(f"  ⏭️ Skip prima variante con 'perso' nel titolo: {v.get('title')}")
+        else:
+            log(f"🔄 Ricreo prima variante: {v.get('option1')} / {v.get('option2')} / {v.get('option3')}")
+            
+            payload = {"variant": {
+                "option1": v["option1"],
+                "option2": v.get("option2"),
+                "option3": v.get("option3"),
+                "price": v.get("price"),
+                "compare_at_price": v.get("compare_at_price"),
+                "sku": v.get("sku"),
+                "barcode": v.get("barcode"),
+                "inventory_management": v.get("inventory_management"),
+                "inventory_policy": v.get("inventory_policy"),
+                "fulfillment_service": v.get("fulfillment_service"),
+                "requires_shipping": v.get("requires_shipping", True),
+                "taxable": v.get("taxable", True),
+                "weight": v.get("weight", 0),
+                "weight_unit": v.get("weight_unit", "kg")
+            }}
+            
+            try:
+                res = safe_request(
+                    "POST",
+                    f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/products/{product_id}/variants.json",
+                    headers=HEADERS,
+                    json=payload
+                )
+                new_variant = res.json().get("variant", {})
+                new_inventory_item_id = new_variant.get("inventory_item_id")
+                
+                if new_inventory_item_id:
+                    variant_mapping[old_variant_id] = new_inventory_item_id
+                    log(f"  ✅ Prima variante ricreata, nuovo inventory_item_id: {new_inventory_item_id}")
+                
+                time.sleep(0.6)
+            except Exception as e:
+                log(f"❌ Errore creazione prima variante: {e}")
+
+        # ===== STEP 7: RIPRISTINA INVENTORY LEVELS =====
         log("📍 Ripristino inventory levels...")
         cur.execute("""
             SELECT variant_id, location_id, available 
@@ -264,19 +319,7 @@ def main():
                 log(f"  🔄 Ripristino inventory: location {location_id}, qty {available}")
                 set_inventory_level(new_inventory_item_id, location_id, available)
             else:
-                log(f"  ⚠️ Impossibile ripristinare inventory per variant {old_variant_id} (mapping non trovato)")
-
-        # ===== STEP 7: ELIMINA LA DUMMY VARIANT =====
-        try:
-            safe_request(
-                "DELETE",
-                f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/variants/{dummy_id}.json",
-                headers=HEADERS
-            )
-            log("✅ Variante DUMMY eliminata")
-            time.sleep(0.6)
-        except Exception as e:
-            log(f"❌ Errore eliminazione dummy: {e}")
+                log(f"  ⚠️ Impossibile ripristinare inventory per variant {old_variant_id} (variante non ricreata o skippata)")
 
         log(f"✅ Prodotto {product_id} completato con successo!\n")
 
