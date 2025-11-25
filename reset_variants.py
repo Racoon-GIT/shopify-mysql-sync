@@ -80,6 +80,21 @@ def set_inventory_level(inventory_item_id, location_id, available):
         log(f"  ❌ Errore impostazione inventory: {e}")
         return False
 
+def remove_inventory_level(inventory_item_id, location_id):
+    """Rimuove l'inventory level per una location specifica"""
+    try:
+        safe_request(
+            "DELETE",
+            f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/inventory_levels.json?inventory_item_id={inventory_item_id}&location_id={location_id}",
+            headers=HEADERS
+        )
+        log(f"  🗑️ Inventory level rimosso: location {location_id}")
+        time.sleep(0.6)
+        return True
+    except Exception as e:
+        log(f"  ❌ Errore rimozione inventory level: {e}")
+        return False
+
 # ---------- DB ------------------------------------------------------
 def connect_db():
     return mysql.connector.connect(
@@ -149,6 +164,11 @@ def main():
 
         # ===== STEP 2: BACKUP VARIANTI + INVENTORY =====
         log(f"💾 Backup varianti e inventory levels...")
+        
+        # Mappa per tracciare le location originali di ogni variante
+        # Format: {old_variant_id: [location_id1, location_id2, ...]}
+        original_locations = {}
+        
         for idx, v in enumerate(variants):
             # Backup dati variante
             cur.execute(
@@ -159,12 +179,18 @@ def main():
             # Backup inventory levels (solo se gestito)
             if v.get("inventory_management") and v.get("inventory_item_id"):
                 inventory_levels = get_inventory_levels(v["inventory_item_id"])
+                locations_for_variant = []
+                
                 for level in inventory_levels:
                     cur.execute(
                         "INSERT INTO inventory_backup (variant_id, inventory_item_id, location_id, available) VALUES (%s, %s, %s, %s)",
                         (v["id"], v["inventory_item_id"], level["location_id"], level["available"])
                     )
+                    locations_for_variant.append(level["location_id"])
                     log(f"  💾 Backup inventory: variant {v['id']}, location {level['location_id']}, qty {level['available']}")
+                
+                # Salva le location originali per questa variante
+                original_locations[v["id"]] = locations_for_variant
         
         db.commit()
 
@@ -320,6 +346,23 @@ def main():
                 set_inventory_level(new_inventory_item_id, location_id, available)
             else:
                 log(f"  ⚠️ Impossibile ripristinare inventory per variant {old_variant_id} (variante non ricreata o skippata)")
+
+        # ===== STEP 8: RIMUOVI LOCATION EXTRA NON ORIGINALI =====
+        log("🧹 Pulizia location inventory non utilizzate...")
+        for old_variant_id, new_inventory_item_id in variant_mapping.items():
+            # Ottieni le location originali per questa variante
+            original_locs = set(original_locations.get(old_variant_id, []))
+            
+            # Ottieni le location attuali della nuova variante
+            current_levels = get_inventory_levels(new_inventory_item_id)
+            
+            for level in current_levels:
+                current_location_id = level["location_id"]
+                
+                # Se questa location NON era nell'originale, rimuovila
+                if current_location_id not in original_locs:
+                    log(f"  🗑️ Rimozione location extra {current_location_id} per inventory_item {new_inventory_item_id}")
+                    remove_inventory_level(new_inventory_item_id, current_location_id)
 
         log(f"✅ Prodotto {product_id} completato con successo!\n")
 
