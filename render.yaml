@@ -1,7 +1,59 @@
+# render.yaml
+# Configurazione servizi Render.com per shopify-mysql-sync
+
 services:
+  # Cron job giornaliero per sincronizzazione prodotti Shopify -> MySQL
   - type: cron
     name: shopify-sync
-    schedule: "@daily"
-    env: python
-    buildCommand: ""
+    runtime: python
+    region: frankfurt
+    plan: free
+    schedule: "0 3 * * *"  # Ogni giorno alle 03:00 UTC
+    buildCommand: "pip install -r requirements.txt"
     startCommand: "python shopify_to_mysql.py"
+    envVars:
+      - key: SHOPIFY_DOMAIN
+        sync: false
+      - key: SHOPIFY_TOKEN
+        sync: false
+      - key: SHOPIFY_API_VERSION
+        value: "2024-04"
+      - key: DB_HOST
+        sync: false
+      - key: DB_USER
+        sync: false
+      - key: DB_PASS
+        sync: false
+      - key: DB_NAME
+        sync: false
+      - key: DEBUG
+        value: "true"
+
+  # Cron job manuale per reset varianti (eseguire solo quando necessario)
+  - type: cron
+    name: reset-variants
+    runtime: python
+    region: frankfurt
+    plan: free
+    schedule: "0 0 31 2 *"  # Mai (31 febbraio non esiste) - esecuzione solo manuale
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python reset_variants.py"
+    envVars:
+      - key: SHOPIFY_DOMAIN
+        sync: false
+      - key: SHOPIFY_TOKEN
+        sync: false
+      - key: SHOPIFY_API_VERSION
+        value: "2024-04"
+      - key: DB_HOST
+        sync: false
+      - key: DB_USER
+        sync: false
+      - key: DB_PASS
+        sync: false
+      - key: DB_NAME
+        sync: false
+      - key: PRODUCT_IDS
+        sync: false  # Impostare manualmente prima dell'esecuzione
+      - key: DEBUG
+        value: "true"

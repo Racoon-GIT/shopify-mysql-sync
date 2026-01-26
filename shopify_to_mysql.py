@@ -1,251 +1,184 @@
-# shopify_to_mysql.py
 #!/usr/bin/env python3
+# shopify_to_mysql.py
+"""
+Sincronizzazione prodotti Shopify -> MySQL.
 
-try:
-    import os, sys, time
-    from decimal import Decimal
-    import requests
-    import mysql.connector
-    from collections import defaultdict
-except Exception as e:
-    print(f"❌ Errore fatale in fase di import: {e}", flush=True)
-    sys.exit(1)
-
-DEBUG = True
-
-# === VARIABILI D'AMBIENTE ===
-SHOP_DOMAIN  = os.getenv("SHOPIFY_DOMAIN")
-ACCESS_TOKEN = os.getenv("SHOPIFY_TOKEN")
-DB_HOST      = os.getenv("DB_HOST")
-DB_USER      = os.getenv("DB_USER")
-DB_PASS      = os.getenv("DB_PASS")
-DB_NAME      = os.getenv("DB_NAME")
-API_VERSION  = "2024-04"
-
-HEADERS = {
-    "X-Shopify-Access-Token": ACCESS_TOKEN,
-    "Content-Type": "application/json"
-}
-
-def log(msg: str) -> None:
-    ts = time.strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
-
-# === GESTIONE RATE LIMIT ===
-def safe_get(url, retries=5, backoff=1.0):
-    for attempt in range(retries):
-        res = requests.get(url, headers=HEADERS)
-        if res.status_code == 429:
-            retry_after_raw = res.headers.get("Retry-After", "2")
-            try:
-                retry_after = float(retry_after_raw)
-            except ValueError:
-                retry_after = 2.0
-            wait = retry_after * backoff
-            log(f"⏳ Rate limit. Aspetto {wait:.1f}s...")
-            time.sleep(wait)
-            continue
-        res.raise_for_status()
-        return res
-    raise Exception(f"❌ Troppe richieste, anche dopo {retries} tentativi: {url}")
-
-# === TABELLE MYSQL ===
-DDL_ONLINE_PRODUCTS = """
-CREATE TABLE IF NOT EXISTS online_products (
-  Variant_id        BIGINT PRIMARY KEY,
-  Variant_Title     TEXT,
-  SKU               VARCHAR(255),
-  Barcode           VARCHAR(255),
-  Product_id        BIGINT,
-  Product_title     TEXT,
-  Product_handle    VARCHAR(255),
-  Vendor            VARCHAR(255),
-  Price             DECIMAL(10,2),
-  Compare_AT_Price  DECIMAL(10,2),
-  Inventory_Item_ID BIGINT,
-  Tags              TEXT,
-  Collections       TEXT
-)
+Funzionalità:
+- Recupera tutti i prodotti attivi da Shopify (filtrati per tag specifici)
+- Sincronizza varianti su tabella MySQL online_products
+- Traccia storico variazioni prezzi su price_history
+- Rimuove varianti non più presenti su Shopify
 """
 
-DDL_PRICE_HISTORY = """
-CREATE TABLE IF NOT EXISTS price_history (
-  id                BIGINT AUTO_INCREMENT PRIMARY KEY,
-  Variant_id        BIGINT,
-  Old_Price         DECIMAL(10,2),
-  New_Price         DECIMAL(10,2),
-  Old_Compare_AT    DECIMAL(10,2),
-  New_Compare_AT    DECIMAL(10,2),
-  changed_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-)
-"""
+import sys
+from decimal import Decimal
 
-# === FILTRO TAG ===
-VALID_TAGS = {
-    "sneakers personalizzate",
-    "scarpe personalizzate",
-    "ciabatte personalizzate",
-    "stivali personalizzati"
-}
+from src.config import Config, log
+from src.shopify_client import ShopifyClient
+from src.db import Database
 
-def is_shoe(product: dict) -> bool:
+
+def is_shoe(product: dict, valid_tags: set) -> bool:
+    """
+    Verifica se il prodotto è una calzatura in base ai tag.
+
+    Args:
+        product: Dati prodotto Shopify
+        valid_tags: Set di tag validi
+
+    Returns:
+        bool: True se il prodotto ha almeno un tag valido
+    """
     tags_raw = product.get("tags", "")
     tags = [t.strip().lower() for t in tags_raw.split(",")]
-    return any(tag in VALID_TAGS for tag in tags)
+    return any(tag in valid_tags for tag in tags)
 
-# === PAGINAZIONE SHOPIFY ===
-def extract_next(link_header: str | None) -> str | None:
-    if not link_header:
-        return None
-    for part in link_header.split(","):
-        if 'rel="next"' in part:
-            return part.split(";")[0].strip("<> ")
-    return None
 
-# === CREA MAPPA {product_id: [collection1, collection2]} ===
-def build_product_collections_map() -> dict:
-    product_to_collections = defaultdict(list)
+def sync_products(config: Config, client: ShopifyClient, db: Database) -> None:
+    """
+    Esegue la sincronizzazione completa dei prodotti.
 
-    def fetch_all_collections(endpoint: str):
-        url = f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/{endpoint}?limit=250"
-        while url:
-            res = safe_get(url)
-            collections = res.json().get(endpoint.split(".")[0], [])
-            for coll in collections:
-                coll_id = coll["id"]
-                title = coll["title"]
-                # recupera i prodotti nella collezione
-                prod_url = f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/collections/{coll_id}/products.json?limit=250"
-                while prod_url:
-                    r = safe_get(prod_url)
-                    for p in r.json().get("products", []):
-                        product_to_collections[p["id"]].append(title)
-                    prod_url = extract_next(r.headers.get("Link"))
-            url = extract_next(res.headers.get("Link"))
+    Args:
+        config: Configurazione
+        client: Client Shopify
+        db: Connessione database
+    """
+    # Inizializza tabelle
+    db.init_sync_tables()
 
-    log("🔁 Caricamento mappa collezioni da custom_collections...")
-    fetch_all_collections("custom_collections.json")
-    log("🔁 Caricamento mappa collezioni da smart_collections...")
-    fetch_all_collections("smart_collections.json")
-    log(f"✅ Mappa collezioni creata con {len(product_to_collections)} prodotti.")
-    return product_to_collections
+    # Recupera varianti esistenti
+    existing_ids = db.get_existing_variant_ids()
 
-# === MAIN ===
-def main():
-    log("🔌 Connessione a MySQL…")
-    conn = mysql.connector.connect(
-        host=DB_HOST, user=DB_USER, password=DB_PASS, database=DB_NAME
-    )
-    cur = conn.cursor()
-    cur.execute(DDL_ONLINE_PRODUCTS)
-    cur.execute(DDL_PRICE_HISTORY)
-    conn.commit()
+    # Costruisce mappa collezioni
+    collection_map = client.build_product_collections_map()
 
-    cur.execute("SELECT Variant_id FROM online_products")
-    existing_ids = {row[0] for row in cur.fetchall()}
+    # Recupera ID location "Magazzino"
+    log("📍 Recupero ID location 'Magazzino'...")
+    magazzino_location_id = client.get_location_id_by_name("Magazzino")
+    if magazzino_location_id:
+        log(f"✅ Location 'Magazzino' trovata: ID {magazzino_location_id}")
+    else:
+        log("⚠️ Location 'Magazzino' non trovata - Stock_Magazzino sarà NULL")
 
-    # Costruisci la mappa collezioni
-    collection_map = build_product_collections_map()
-
-    base_url = f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/products.json?status=active&limit=250"
-    next_url = None
-    page = tot_ins = tot_upd = 0
+    # Contatori
+    page = 0
+    tot_ins = 0
+    tot_upd = 0
     seen_ids = set()
 
-    while True:
-        url = next_url or base_url
+    # Raccogli prima tutti i prodotti filtrati per recuperare inventory in batch
+    log("🔄 Raccolta prodotti e varianti...")
+    products_to_sync = []
+
+    for product in client.get_products(status="active"):
+        # Filtro per tag
+        if not is_shoe(product, config.VALID_TAGS):
+            continue
+        products_to_sync.append(product)
+
+    log(f"📦 Trovati {len(products_to_sync)} prodotti da sincronizzare")
+
+    # Raccogli tutti gli inventory_item_id per batch query
+    all_inventory_item_ids = []
+    for product in products_to_sync:
+        for variant in product.get("variants", []):
+            inv_id = variant.get("inventory_item_id")
+            if inv_id:
+                all_inventory_item_ids.append(inv_id)
+
+    # Recupera inventory per location Magazzino in batch
+    inventory_map = {}
+    if magazzino_location_id and all_inventory_item_ids:
+        log(f"📊 Recupero stock Magazzino per {len(all_inventory_item_ids)} varianti...")
+        inventory_map = client.build_inventory_map_for_location(
+            all_inventory_item_ids,
+            magazzino_location_id
+        )
+        log(f"✅ Stock recuperato per {len([v for v in inventory_map.values() if v is not None])} varianti")
+
+    # Ora sincronizza i prodotti
+    for product in products_to_sync:
+        tags_string = product.get("tags", "")
+        collections = ", ".join(collection_map.get(product["id"], []))
+
+        ins_count = 0
+        upd_count = 0
+
+        for variant in product.get("variants", []):
+            vid = variant["id"]
+            seen_ids.add(vid)
+
+            price = Decimal(variant["price"] or "0")
+            compare = Decimal(variant["compare_at_price"] or "0")
+
+            # Recupera stock Magazzino dalla mappa
+            inventory_item_id = variant.get("inventory_item_id", 0)
+            stock_magazzino = inventory_map.get(inventory_item_id)
+
+            # Verifica se esiste e se i prezzi sono cambiati
+            existing = db.get_variant_prices(vid)
+            if existing:
+                old_price, old_cmp = existing
+                if old_price != price or old_cmp != compare:
+                    db.insert_price_history(vid, old_price, price, old_cmp, compare)
+                upd_count += 1
+            else:
+                ins_count += 1
+
+            # Upsert
+            db.upsert_product(
+                variant_id=vid,
+                variant_title=variant.get("title", ""),
+                sku=variant.get("sku", ""),
+                barcode=variant.get("barcode", ""),
+                product_id=product["id"],
+                product_title=product.get("title", ""),
+                product_handle=product.get("handle", ""),
+                vendor=product.get("vendor", ""),
+                price=price,
+                compare_at_price=compare,
+                inventory_item_id=inventory_item_id,
+                stock_magazzino=stock_magazzino,
+                tags=tags_string,
+                collections=collections
+            )
+
+        # Commit per prodotto (ottimizzato rispetto a singola variante)
+        db.commit()
+        tot_ins += ins_count
+        tot_upd += upd_count
+
+        # Log periodico
         page += 1
-        res = safe_get(url)
-        products = res.json().get("products", [])
-
-        ins_page = upd_page = 0
-
-        for p in products:
-            if not is_shoe(p):
-                continue
-
-            tags_string = p.get("tags", "")
-            collections = ", ".join(collection_map.get(p["id"], []))
-
-            for v in p["variants"]:
-                vid = v["id"]
-                seen_ids.add(vid)
-
-                price = Decimal(v["price"] or "0")
-                compare = Decimal(v["compare_at_price"] or "0")
-
-                cur.execute("SELECT Price, Compare_AT_Price FROM online_products WHERE Variant_id=%s", (vid,))
-                row = cur.fetchone()
-                if row:
-                    old_price, old_cmp = row
-                    if old_price != price or old_cmp != compare:
-                        cur.execute(
-                            "INSERT INTO price_history (Variant_id, Old_Price, New_Price, Old_Compare_AT, New_Compare_AT) "
-                            "VALUES (%s,%s,%s,%s,%s)",
-                            (vid, old_price, price, old_cmp, compare)
-                        )
-                    upd_page += 1
-                else:
-                    ins_page += 1
-
-                cur.execute("""
-                    INSERT INTO online_products (
-                      Variant_id, Variant_Title, SKU, Barcode,
-                      Product_id, Product_title, Product_handle, Vendor,
-                      Price, Compare_AT_Price, Inventory_Item_ID,
-                      Tags, Collections
-                    )
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                    ON DUPLICATE KEY UPDATE
-                      Variant_Title=VALUES(Variant_Title),
-                      SKU=VALUES(SKU),
-                      Barcode=VALUES(Barcode),
-                      Product_id=VALUES(Product_id),
-                      Product_title=VALUES(Product_title),
-                      Product_handle=VALUES(Product_handle),
-                      Vendor=VALUES(Vendor),
-                      Price=VALUES(Price),
-                      Compare_AT_Price=VALUES(Compare_AT_Price),
-                      Inventory_Item_ID=VALUES(Inventory_Item_ID),
-                      Tags=VALUES(Tags),
-                      Collections=VALUES(Collections)
-                """, (
-                    vid, v["title"], v["sku"], v["barcode"],
-                    p["id"], p["title"], p["handle"], p["vendor"],
-                    price, compare, v["inventory_item_id"],
-                    tags_string, collections
-                ))
-
-            conn.commit()
-            time.sleep(0.2)
-
-        if DEBUG:
-            log(f"[Pagina {page}] ➕ Insert: {ins_page} | ↺ Update: {upd_page}")
-        tot_ins += ins_page
-        tot_upd += upd_page
-
-        next_url = extract_next(res.headers.get("Link"))
-        if not next_url:
-            break
+        if config.debug and page % 10 == 0:
+            log(f"[Prodotti elaborati: {page}] ➕ Insert: {tot_ins} | ↺ Update: {tot_upd}")
 
     # Rimozione varianti scomparse
     to_delete = existing_ids - seen_ids
     if to_delete:
-        cur.execute(
-            f"DELETE FROM online_products WHERE Variant_id IN ({','.join(['%s']*len(to_delete))})",
-            tuple(to_delete)
-        )
-        log(f"🗑️  Rimossi {cur.rowcount} varianti non più su Shopify")
+        deleted = db.delete_variants(to_delete)
+        log(f"🗑️  Rimossi {deleted} varianti non più su Shopify")
 
-    conn.commit()
-    cur.close()
-    conn.close()
+    db.commit()
     log(f"✅ Sync completato. ➕ {tot_ins} insert | ↺ {tot_upd} update | Totale attuale: {len(seen_ids)}")
 
-# === ENTRYPOINT ===
-if __name__ == "__main__":
+
+def main() -> None:
+    """Entry point principale."""
     try:
-        main()
+        # Carica configurazione (product_ids non richiesto per sync)
+        config = Config.from_env(require_product_ids=False)
+
+        # Inizializza client e database
+        client = ShopifyClient(config)
+
+        with Database(config) as db:
+            sync_products(config, client, db)
+
     except Exception as exc:
         log(f"❌ Errore fatale: {exc}")
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
