@@ -1,2 +1,8 @@
-requests
-mysql-connector-python
+# requirements.txt
+# Dipendenze per shopify-mysql-sync
+
+# HTTP client per chiamate API Shopify
+requests>=2.28.0
+
+# Connector MySQL
+mysql-connector-python>=8.0.0

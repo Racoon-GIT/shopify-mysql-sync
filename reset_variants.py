@@ -1,387 +1,357 @@
-import os
+#!/usr/bin/env python3
+# reset_variants.py
+"""
+Reset e ricreazione varianti prodotti Shopify.
+
+Funzionalità:
+- Cancella e ricrea tutte le varianti di un prodotto
+- Preserva inventory levels per tutte le location
+- Filtra varianti con "perso" nel titolo
+- Pulisce location non originali dopo ricreazione
+
+Strategia (compatibile con metafield su option):
+1. Backup varianti e inventory in tabelle temporanee MySQL
+2. Delete varianti 2-N
+3. Recreate varianti 2-N
+4. Delete variante 1
+5. Recreate variante 1
+6. Ripristina inventory levels
+7. Cleanup location extra
+"""
+
 import sys
-import time
 import json
-import requests
-import mysql.connector
-from mysql.connector import Error
+from typing import Dict, Optional
 
-# ---------- CONFIG -------------------------------------------------
-SHOP_DOMAIN  = os.getenv("SHOPIFY_DOMAIN")
-ACCESS_TOKEN = os.getenv("SHOPIFY_TOKEN")
-DB_HOST      = os.getenv("DB_HOST")
-DB_USER      = os.getenv("DB_USER")
-DB_PASS      = os.getenv("DB_PASS")
-DB_NAME      = os.getenv("DB_NAME")
-API_VERSION  = "2024-04"
-HEADERS = {
-    "X-Shopify-Access-Token": ACCESS_TOKEN,
-    "Content-Type": "application/json"
-}
+from src.config import Config, log
+from src.shopify_client import ShopifyClient
+from src.db import Database
 
-# ---------- LOG ----------------------------------------------------
-def log(msg: str) -> None:
-    ts = time.strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
 
-# ---------- UTILS --------------------------------------------------
-def safe_request(method, url, headers=None, json=None, max_retries=5):
-    for attempt in range(max_retries):
-        res = requests.request(method, url, headers=headers, json=json)
-        if res.status_code == 429:
-            wait = 2 ** attempt
-            log(f"⚠️ Rate limit, attendo {wait}s...")
-            time.sleep(wait)
-            continue
-        if res.status_code >= 400:
-            try:
-                error_detail = res.json()
-                log(f"❌ Errore API {res.status_code}: {json.dumps(error_detail, indent=2)}")
-            except:
-                log(f"❌ Errore API {res.status_code}: {res.text}")
-        res.raise_for_status()
-        return res
-    raise Exception("❌ Troppe richieste, impossibile continuare")
+def backup_variants_and_inventory(
+    product_id: str,
+    variants: list,
+    client: ShopifyClient,
+    db: Database
+) -> None:
+    """
+    Esegue backup di varianti e inventory levels.
 
-# ---------- INVENTORY MANAGEMENT -----------------------------------
-def get_inventory_levels(inventory_item_id):
-    """Recupera tutti gli inventory levels per un inventory_item_id"""
-    try:
-        res = safe_request(
-            "GET",
-            f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/inventory_levels.json?inventory_item_ids={inventory_item_id}",
-            headers=HEADERS
+    Args:
+        product_id: ID prodotto
+        variants: Lista varianti da Shopify
+        client: Client Shopify
+        db: Database
+    """
+    log("💾 Backup varianti e inventory levels...")
+
+    for idx, variant in enumerate(variants):
+        # Backup dati variante (JSON completo)
+        db.backup_variant(
+            variant_id=variant["id"],
+            product_id=int(product_id),
+            inventory_item_id=variant.get("inventory_item_id"),
+            variant_json=json.dumps(variant),
+            position=idx
         )
-        levels = res.json().get("inventory_levels", [])
-        return levels
-    except Exception as e:
-        log(f"⚠️ Errore recupero inventory levels: {e}")
-        return []
 
-def set_inventory_level(inventory_item_id, location_id, available):
-    """Imposta l'inventory level per una location specifica"""
-    try:
-        payload = {
-            "location_id": location_id,
-            "inventory_item_id": inventory_item_id,
-            "available": available
-        }
-        safe_request(
-            "POST",
-            f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/inventory_levels/set.json",
-            headers=HEADERS,
-            json=payload
-        )
-        log(f"  ✅ Inventory impostato: location {location_id} → {available} unità")
-        time.sleep(0.6)
-        return True
-    except Exception as e:
-        log(f"  ❌ Errore impostazione inventory: {e}")
-        return False
+        # Backup inventory levels (solo se gestito)
+        if variant.get("inventory_management") and variant.get("inventory_item_id"):
+            inventory_levels = client.get_inventory_levels(variant["inventory_item_id"])
 
-def remove_inventory_level(inventory_item_id, location_id):
-    """Rimuove l'inventory level per una location specifica"""
-    try:
-        safe_request(
-            "DELETE",
-            f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/inventory_levels.json?inventory_item_id={inventory_item_id}&location_id={location_id}",
-            headers=HEADERS
-        )
-        log(f"  🗑️ Location {location_id} rimossa (non presente nell'originale)")
-        time.sleep(0.6)
-        return True
-    except Exception as e:
-        log(f"  ❌ Errore rimozione inventory level: {e}")
-        return False
-
-# ---------- DB ------------------------------------------------------
-def connect_db():
-    return mysql.connector.connect(
-        host=DB_HOST,
-        user=DB_USER,
-        password=DB_PASS,
-        database=DB_NAME
-    )
-
-def ensure_temp_tables(cur):
-    # Tabella backup varianti
-    cur.execute("""
-        CREATE TEMPORARY TABLE IF NOT EXISTS variant_backup (
-            id BIGINT,
-            product_id BIGINT,
-            inventory_item_id BIGINT,
-            variant_json TEXT,
-            position INT,
-            PRIMARY KEY (product_id, id)
-        )
-    """)
-    cur.execute("DELETE FROM variant_backup")
-    
-    # Tabella backup inventory levels
-    cur.execute("""
-        CREATE TEMPORARY TABLE IF NOT EXISTS inventory_backup (
-            variant_id BIGINT,
-            inventory_item_id BIGINT,
-            location_id BIGINT,
-            available INT,
-            PRIMARY KEY (variant_id, location_id)
-        )
-    """)
-    cur.execute("DELETE FROM inventory_backup")
-
-# ---------- MAIN ----------------------------------------------------
-def main():
-    product_ids_env = os.getenv("PRODUCT_IDS")
-    if not product_ids_env:
-        log("❌ Variabile d'ambiente PRODUCT_IDS non definita")
-        sys.exit(1)
-
-    product_ids = [pid.strip() for pid in product_ids_env.split(",") if pid.strip()]
-    db = connect_db()
-    cur = db.cursor()
-    ensure_temp_tables(cur)
-
-    for product_id in product_ids:
-        log(f"📦 Elaborazione prodotto: {product_id}")
-
-        # ===== STEP 1: FETCH VARIANTI =====
-        try:
-            res = safe_request(
-                "GET",
-                f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/products/{product_id}/variants.json",
-                headers=HEADERS
-            )
-            variants = res.json().get("variants", [])
-            log(f"🔍 Trovate {len(variants)} varianti")
-        except Exception as e:
-            log(f"❌ Errore durante l'accesso alle varianti: {e}")
-            continue
-
-        if not variants:
-            log("⚠️ Nessuna variante trovata, skip prodotto")
-            continue
-
-        # ===== STEP 2: BACKUP VARIANTI + INVENTORY =====
-        log(f"💾 Backup varianti e inventory levels...")
-        
-        for idx, v in enumerate(variants):
-            # Backup dati variante
-            cur.execute(
-                "INSERT INTO variant_backup (id, product_id, inventory_item_id, variant_json, position) VALUES (%s, %s, %s, %s, %s)",
-                (v["id"], product_id, v.get("inventory_item_id"), json.dumps(v), idx)
-            )
-            
-            # Backup inventory levels (solo se gestito)
-            if v.get("inventory_management") and v.get("inventory_item_id"):
-                inventory_levels = get_inventory_levels(v["inventory_item_id"])
-                
-                for level in inventory_levels:
-                    cur.execute(
-                        "INSERT INTO inventory_backup (variant_id, inventory_item_id, location_id, available) VALUES (%s, %s, %s, %s)",
-                        (v["id"], v["inventory_item_id"], level["location_id"], level["available"])
-                    )
-                    log(f"  💾 Backup inventory: variant {v['id']}, location {level['location_id']}, qty {level['available']}")
-        
-        db.commit()
-
-        # ===== STEP 3: CANCELLA VARIANTI DALLA 2 ALLA N =====
-        log("🗑️ Cancellazione varianti dalla 2 alla N...")
-        for v in variants[1:]:
-            try:
-                safe_request(
-                    "DELETE",
-                    f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/variants/{v['id']}.json",
-                    headers=HEADERS
+            for level in inventory_levels:
+                db.backup_inventory(
+                    variant_id=variant["id"],
+                    inventory_item_id=variant["inventory_item_id"],
+                    location_id=level["location_id"],
+                    available=level["available"]
                 )
-                log(f"  ✅ Cancellata variante {v['id']} ({v.get('title')})")
-                time.sleep(0.6)
-            except Exception as e:
-                log(f"❌ Errore delete variante {v['id']}: {e}")
+                log(f"  💾 Backup inventory: variant {variant['id']}, "
+                    f"location {level['location_id']}, qty {level['available']}")
 
-        # ===== STEP 4: RICREA VARIANTI 2-N DA BACKUP =====
-        log("🔄 Ricreazione varianti dalla 2 alla N...")
-        cur.execute("""
-            SELECT id, inventory_item_id, variant_json, position
-            FROM variant_backup 
-            WHERE product_id = %s
-            ORDER BY position
-        """, (product_id,))
-        rows = cur.fetchall()
-        
-        # Mappa per tracciare old_variant_id -> new_inventory_item_id
-        variant_mapping = {}
-        
-        # Ricrea dalla posizione 1 in poi (skip posizione 0 = prima variante)
-        for (old_variant_id, old_inventory_item_id, variant_json, position) in rows[1:]:
-            v = json.loads(variant_json)
-            
-            # FILTRO: Salta varianti con "perso" nel titolo
-            if "perso" in v.get("title", "").lower():
-                log(f"  ⏭️ Skip variante con 'perso' nel titolo: {v.get('title')}")
-                continue
-            
-            log(f"🔄 Ricreo variante: {v.get('option1')} / {v.get('option2')} / {v.get('option3')}")
-            
-            # Payload per creare la variante
-            payload = {"variant": {
-                "option1": v["option1"],
-                "option2": v.get("option2"),
-                "option3": v.get("option3"),
-                "price": v.get("price"),
-                "compare_at_price": v.get("compare_at_price"),
-                "sku": v.get("sku"),
-                "barcode": v.get("barcode"),
-                "inventory_management": v.get("inventory_management"),
-                "inventory_policy": v.get("inventory_policy"),
-                "fulfillment_service": v.get("fulfillment_service"),
-                "requires_shipping": v.get("requires_shipping", True),
-                "taxable": v.get("taxable", True),
-                "weight": v.get("weight", 0),
-                "weight_unit": v.get("weight_unit", "kg")
-            }}
-            
-            try:
-                res = safe_request(
-                    "POST",
-                    f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/products/{product_id}/variants.json",
-                    headers=HEADERS,
-                    json=payload
-                )
-                new_variant = res.json().get("variant", {})
-                new_inventory_item_id = new_variant.get("inventory_item_id")
-                
-                if new_inventory_item_id:
-                    variant_mapping[old_variant_id] = new_inventory_item_id
-                    log(f"  ✅ Variante ricreata, nuovo inventory_item_id: {new_inventory_item_id}")
-                
-                time.sleep(0.6)
-            except Exception as e:
-                log(f"❌ Errore creazione variante: {e}")
-                continue
+    db.commit()
 
-        # ===== STEP 5: CANCELLA LA PRIMA VARIANTE (ora possibile) =====
-        first_variant = variants[0]
-        log(f"🗑️ Cancellazione prima variante: {first_variant['id']} ({first_variant.get('title')})")
-        try:
-            safe_request(
-                "DELETE",
-                f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/variants/{first_variant['id']}.json",
-                headers=HEADERS
-            )
-            log("  ✅ Prima variante cancellata")
-            time.sleep(0.6)
-        except Exception as e:
-            log(f"❌ Errore cancellazione prima variante: {e}")
 
-        # ===== STEP 6: RICREA LA PRIMA VARIANTE DA BACKUP =====
-        log("🔄 Ricreazione prima variante...")
-        first_row = rows[0]
-        old_variant_id, old_inventory_item_id, variant_json, position = first_row
-        v = json.loads(variant_json)
-        
-        # FILTRO: Salta se contiene "perso"
-        if "perso" in v.get("title", "").lower():
-            log(f"  ⏭️ Skip prima variante con 'perso' nel titolo: {v.get('title')}")
+def delete_variants(
+    product_id: str,
+    variants: list,
+    client: ShopifyClient,
+    skip_first: bool = True
+) -> None:
+    """
+    Elimina varianti dal prodotto.
+
+    Args:
+        product_id: ID prodotto
+        variants: Lista varianti da eliminare
+        client: Client Shopify
+        skip_first: Se True, salta la prima variante
+    """
+    variants_to_delete = variants[1:] if skip_first else variants
+
+    for variant in variants_to_delete:
+        if client.delete_variant(int(product_id), variant["id"]):
+            log(f"  ✅ Cancellata variante {variant['id']} ({variant.get('title')})")
         else:
-            log(f"🔄 Ricreo prima variante: {v.get('option1')} / {v.get('option2')} / {v.get('option3')}")
-            
-            payload = {"variant": {
-                "option1": v["option1"],
-                "option2": v.get("option2"),
-                "option3": v.get("option3"),
-                "price": v.get("price"),
-                "compare_at_price": v.get("compare_at_price"),
-                "sku": v.get("sku"),
-                "barcode": v.get("barcode"),
-                "inventory_management": v.get("inventory_management"),
-                "inventory_policy": v.get("inventory_policy"),
-                "fulfillment_service": v.get("fulfillment_service"),
-                "requires_shipping": v.get("requires_shipping", True),
-                "taxable": v.get("taxable", True),
-                "weight": v.get("weight", 0),
-                "weight_unit": v.get("weight_unit", "kg")
-            }}
-            
-            try:
-                res = safe_request(
-                    "POST",
-                    f"https://{SHOP_DOMAIN}/admin/api/{API_VERSION}/products/{product_id}/variants.json",
-                    headers=HEADERS,
-                    json=payload
-                )
-                new_variant = res.json().get("variant", {})
-                new_inventory_item_id = new_variant.get("inventory_item_id")
-                
-                if new_inventory_item_id:
-                    variant_mapping[old_variant_id] = new_inventory_item_id
-                    log(f"  ✅ Prima variante ricreata, nuovo inventory_item_id: {new_inventory_item_id}")
-                
-                time.sleep(0.6)
-            except Exception as e:
-                log(f"❌ Errore creazione prima variante: {e}")
+            log(f"  ❌ Fallita cancellazione variante {variant['id']}")
 
-        # ===== STEP 7: RIPRISTINA INVENTORY LEVELS =====
-        log("📍 Ripristino inventory levels...")
-        cur.execute("""
-            SELECT variant_id, location_id, available 
-            FROM inventory_backup 
-            WHERE variant_id IN (SELECT id FROM variant_backup WHERE product_id = %s)
-        """, (product_id,))
-        
-        inventory_rows = cur.fetchall()
-        for (old_variant_id, location_id, available) in inventory_rows:
-            new_inventory_item_id = variant_mapping.get(old_variant_id)
-            if new_inventory_item_id:
-                log(f"  🔄 Ripristino inventory: location {location_id}, qty {available}")
-                set_inventory_level(new_inventory_item_id, location_id, available)
-            else:
-                log(f"  ⚠️ Impossibile ripristinare inventory per variant {old_variant_id} (variante non ricreata o skippata)")
 
-        # ===== STEP 8: RIMUOVI LOCATION EXTRA NON ORIGINALI =====
-        log("🧹 Pulizia location inventory non utilizzate...")
-        
-        for old_variant_id, new_inventory_item_id in variant_mapping.items():
-            # Query DB: quali location aveva questa variante nell'originale?
-            cur.execute("""
-                SELECT DISTINCT location_id
-                FROM inventory_backup
-                WHERE variant_id = %s
-            """, (old_variant_id,))
-            
-            original_locations_rows = cur.fetchall()
-            original_locs = set([row[0] for row in original_locations_rows])
-            
-            # Se la variante non aveva inventory backup, skip (non aveva inventory_management)
-            if not original_locs:
-                log(f"  ⏭️ Skip cleanup per variant {old_variant_id} (no inventory management nell'originale)")
-                continue
-            
-            log(f"  🔍 Variant {old_variant_id}: location originali = {original_locs}")
-            
-            # Ottieni le location attuali della nuova variante
-            current_levels = get_inventory_levels(new_inventory_item_id)
-            
-            for level in current_levels:
-                current_location_id = level["location_id"]
-                
-                # Se questa location NON era nell'originale, rimuovila
-                if current_location_id not in original_locs:
-                    log(f"  🗑️ Location {current_location_id} da rimuovere (non era nell'originale)")
-                    remove_inventory_level(new_inventory_item_id, current_location_id)
-                else:
-                    log(f"  ✅ Location {current_location_id} mantenuta (era nell'originale)")
+def create_variant_from_backup(
+    product_id: str,
+    variant_json: str,
+    client: ShopifyClient
+) -> Optional[Dict]:
+    """
+    Crea una variante da backup JSON.
 
-        log(f"✅ Prodotto {product_id} completato con successo!\n")
+    Args:
+        product_id: ID prodotto
+        variant_json: JSON della variante originale
+        client: Client Shopify
 
-    cur.close()
-    db.close()
-    log("🎉 Processo completato per tutti i prodotti!")
+    Returns:
+        Dict: Nuova variante creata o None se skipped/errore
+    """
+    variant = json.loads(variant_json)
 
-if __name__ == "__main__":
+    # Filtro: salta varianti con "perso" nel titolo
+    title = variant.get("title", "")
+    if "perso" in title.lower():
+        log(f"  ⏭️ Skip variante con 'perso' nel titolo: {title}")
+        return None
+
+    log(f"🔄 Ricreo variante: {variant.get('option1')} / "
+        f"{variant.get('option2')} / {variant.get('option3')}")
+
+    # Payload per creazione variante
+    variant_data = {
+        "option1": variant["option1"],
+        "option2": variant.get("option2"),
+        "option3": variant.get("option3"),
+        "price": variant.get("price"),
+        "compare_at_price": variant.get("compare_at_price"),
+        "sku": variant.get("sku"),
+        "barcode": variant.get("barcode"),
+        "inventory_management": variant.get("inventory_management"),
+        "inventory_policy": variant.get("inventory_policy"),
+        "fulfillment_service": variant.get("fulfillment_service"),
+        "requires_shipping": variant.get("requires_shipping", True),
+        "taxable": variant.get("taxable", True),
+        "weight": variant.get("weight", 0),
+        "weight_unit": variant.get("weight_unit", "kg")
+    }
+
     try:
-        main()
+        new_variant = client.create_variant(int(product_id), variant_data)
+        if new_variant.get("inventory_item_id"):
+            log(f"  ✅ Variante ricreata, nuovo inventory_item_id: "
+                f"{new_variant['inventory_item_id']}")
+        return new_variant
+    except Exception as e:
+        log(f"❌ Errore creazione variante: {e}")
+        return None
+
+
+def recreate_variants(
+    product_id: str,
+    backup_rows: list,
+    client: ShopifyClient,
+    skip_first: bool = True
+) -> Dict[int, int]:
+    """
+    Ricrea varianti da backup.
+
+    Args:
+        product_id: ID prodotto
+        backup_rows: Lista tuple (old_id, inventory_item_id, json, position)
+        client: Client Shopify
+        skip_first: Se True, salta la prima variante
+
+    Returns:
+        Dict[int, int]: Mapping {old_variant_id: new_inventory_item_id}
+    """
+    variant_mapping = {}
+    rows_to_process = backup_rows[1:] if skip_first else backup_rows
+
+    for old_variant_id, old_inventory_item_id, variant_json, position in rows_to_process:
+        new_variant = create_variant_from_backup(product_id, variant_json, client)
+
+        if new_variant and new_variant.get("inventory_item_id"):
+            variant_mapping[old_variant_id] = new_variant["inventory_item_id"]
+
+    return variant_mapping
+
+
+def restore_inventory_levels(
+    product_id: str,
+    variant_mapping: Dict[int, int],
+    db: Database,
+    client: ShopifyClient
+) -> None:
+    """
+    Ripristina inventory levels dalle backup.
+
+    Args:
+        product_id: ID prodotto
+        variant_mapping: Mapping old_variant_id -> new_inventory_item_id
+        db: Database
+        client: Client Shopify
+    """
+    log("📍 Ripristino inventory levels...")
+
+    inventory_backups = db.get_inventory_backups(product_id)
+
+    for old_variant_id, location_id, available in inventory_backups:
+        new_inventory_item_id = variant_mapping.get(old_variant_id)
+
+        if new_inventory_item_id:
+            log(f"  🔄 Ripristino inventory: location {location_id}, qty {available}")
+            client.set_inventory_level(new_inventory_item_id, location_id, available)
+        else:
+            log(f"  ⚠️ Impossibile ripristinare inventory per variant {old_variant_id} "
+                "(variante non ricreata o skippata)")
+
+
+def cleanup_extra_locations(
+    variant_mapping: Dict[int, int],
+    db: Database,
+    client: ShopifyClient
+) -> None:
+    """
+    Rimuove location extra non presenti nell'originale.
+
+    Args:
+        variant_mapping: Mapping old_variant_id -> new_inventory_item_id
+        db: Database
+        client: Client Shopify
+    """
+    log("🧹 Pulizia location inventory non utilizzate...")
+
+    for old_variant_id, new_inventory_item_id in variant_mapping.items():
+        # Location originali dal backup
+        original_locations = db.get_original_locations(old_variant_id)
+
+        # Skip se non aveva inventory management
+        if not original_locations:
+            log(f"  ⏭️ Skip cleanup per variant {old_variant_id} "
+                "(no inventory management nell'originale)")
+            continue
+
+        log(f"  🔍 Variant {old_variant_id}: location originali = {original_locations}")
+
+        # Location attuali della nuova variante
+        current_levels = client.get_inventory_levels(new_inventory_item_id)
+
+        for level in current_levels:
+            current_location_id = level["location_id"]
+
+            if current_location_id not in original_locations:
+                log(f"  🗑️ Location {current_location_id} da rimuovere "
+                    "(non era nell'originale)")
+                client.remove_inventory_level(new_inventory_item_id, current_location_id)
+            else:
+                log(f"  ✅ Location {current_location_id} mantenuta (era nell'originale)")
+
+
+def process_product(
+    product_id: str,
+    client: ShopifyClient,
+    db: Database
+) -> bool:
+    """
+    Elabora un singolo prodotto.
+
+    Args:
+        product_id: ID prodotto
+        client: Client Shopify
+        db: Database
+
+    Returns:
+        bool: True se completato con successo
+    """
+    log(f"📦 Elaborazione prodotto: {product_id}")
+
+    # STEP 1: Fetch varianti
+    try:
+        variants = client.get_product_variants(int(product_id))
+        log(f"🔍 Trovate {len(variants)} varianti")
+    except Exception as e:
+        log(f"❌ Errore durante l'accesso alle varianti: {e}")
+        return False
+
+    if not variants:
+        log("⚠️ Nessuna variante trovata, skip prodotto")
+        return False
+
+    # STEP 2: Backup
+    backup_variants_and_inventory(product_id, variants, client, db)
+
+    # STEP 3: Cancella varianti 2-N
+    log("🗑️ Cancellazione varianti dalla 2 alla N...")
+    delete_variants(product_id, variants, client, skip_first=True)
+
+    # STEP 4: Ricrea varianti 2-N
+    log("🔄 Ricreazione varianti dalla 2 alla N...")
+    backup_rows = db.get_variant_backups(product_id)
+    variant_mapping = recreate_variants(product_id, backup_rows, client, skip_first=True)
+
+    # STEP 5: Cancella prima variante
+    first_variant = variants[0]
+    log(f"🗑️ Cancellazione prima variante: {first_variant['id']} ({first_variant.get('title')})")
+    if client.delete_variant(int(product_id), first_variant["id"]):
+        log("  ✅ Prima variante cancellata")
+    else:
+        log("  ❌ Errore cancellazione prima variante")
+
+    # STEP 6: Ricrea prima variante
+    log("🔄 Ricreazione prima variante...")
+    if backup_rows:
+        first_row = backup_rows[0]
+        old_variant_id, old_inventory_item_id, variant_json, position = first_row
+
+        new_variant = create_variant_from_backup(product_id, variant_json, client)
+        if new_variant and new_variant.get("inventory_item_id"):
+            variant_mapping[old_variant_id] = new_variant["inventory_item_id"]
+
+    # STEP 7: Ripristina inventory
+    restore_inventory_levels(product_id, variant_mapping, db, client)
+
+    # STEP 8: Cleanup location extra
+    cleanup_extra_locations(variant_mapping, db, client)
+
+    log(f"✅ Prodotto {product_id} completato con successo!\n")
+    return True
+
+
+def main() -> None:
+    """Entry point principale."""
+    try:
+        # Carica configurazione (product_ids obbligatorio)
+        config = Config.from_env(require_product_ids=True)
+
+        if not config.product_ids:
+            log("❌ Nessun PRODUCT_ID specificato")
+            sys.exit(1)
+
+        # Inizializza client
+        client = ShopifyClient(config)
+
+        with Database(config) as db:
+            # Inizializza tabelle temporanee per backup
+            db.init_backup_tables()
+
+            # Elabora ogni prodotto
+            for product_id in config.product_ids:
+                process_product(product_id, client, db)
+
+        log("🎉 Processo completato per tutti i prodotti!")
+
     except Exception as e:
         log(f"❌ Errore fatale: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
