@@ -37,10 +37,10 @@ class Database:
     )
     """
 
-    # ALTER TABLE per aggiungere colonna se tabella esiste già
+    # ALTER TABLE per aggiungere colonna (senza IF NOT EXISTS per compatibilità MySQL)
     ALTER_ADD_STOCK_MAGAZZINO = """
     ALTER TABLE online_products
-    ADD COLUMN IF NOT EXISTS Stock_Magazzino INT DEFAULT NULL AFTER Inventory_Item_ID
+    ADD COLUMN Stock_Magazzino INT DEFAULT NULL AFTER Inventory_Item_ID
     """
 
     # DDL per storico prezzi
@@ -147,12 +147,36 @@ class Database:
         """Crea tabelle per sincronizzazione prodotti."""
         self.cursor.execute(self.DDL_ONLINE_PRODUCTS)
         self.cursor.execute(self.DDL_PRICE_HISTORY)
-        # Migrazione: aggiunge colonna Stock_Magazzino se non esiste
-        try:
-            self.cursor.execute(self.ALTER_ADD_STOCK_MAGAZZINO)
-        except Exception:
-            pass  # Colonna già esistente o DB non supporta IF NOT EXISTS
+        # Migrazione: aggiunge colonne nuove se non esistono
+        self._add_column_if_not_exists("Stock_Magazzino", "INT DEFAULT NULL", "Inventory_Item_ID")
         self.commit()
+
+    def _add_column_if_not_exists(self, column_name: str, column_def: str, after_column: str) -> None:
+        """
+        Aggiunge una colonna alla tabella online_products se non esiste.
+        Compatibile con tutte le versioni MySQL.
+
+        Args:
+            column_name: Nome della colonna da aggiungere
+            column_def: Definizione della colonna (tipo, default, etc.)
+            after_column: Colonna dopo cui inserire (per ordine)
+        """
+        # Verifica se la colonna esiste già
+        self.cursor.execute("""
+            SELECT COUNT(*) FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE()
+            AND TABLE_NAME = 'online_products'
+            AND COLUMN_NAME = %s
+        """, (column_name,))
+        exists = self.cursor.fetchone()[0] > 0
+
+        if not exists:
+            log(f"📊 Migrazione: aggiunta colonna {column_name}...")
+            self.cursor.execute(f"""
+                ALTER TABLE online_products
+                ADD COLUMN {column_name} {column_def} AFTER {after_column}
+            """)
+            log(f"✅ Colonna {column_name} aggiunta con successo")
 
     def get_existing_variant_ids(self) -> Set[int]:
         """
