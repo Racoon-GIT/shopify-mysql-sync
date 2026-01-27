@@ -33,15 +33,56 @@ class Database:
         Inventory_Item_ID BIGINT,
         Stock_Magazzino   INT DEFAULT NULL,
         Tags              TEXT,
-        Collections       TEXT
+        Collections       TEXT,
+        -- Nuovi campi: Body HTML
+        Body_HTML         LONGTEXT DEFAULT NULL,
+        -- Nuovi campi: Immagini (JSON)
+        Product_Images    JSON DEFAULT NULL,
+        -- Metafield Prodotto
+        MF_Customization_Description TEXT DEFAULT NULL,
+        MF_Shoe_Details              TEXT DEFAULT NULL,
+        MF_Customization_Details     TEXT DEFAULT NULL,
+        MF_O_Description             TEXT DEFAULT NULL,
+        MF_Handling                  INT DEFAULT NULL,
+        MF_Google_Custom_Product     BOOLEAN DEFAULT NULL,
+        -- Metafield Variante (Google Shopping)
+        MF_Google_Age_Group      VARCHAR(100) DEFAULT NULL,
+        MF_Google_Condition      VARCHAR(100) DEFAULT NULL,
+        MF_Google_Gender         VARCHAR(100) DEFAULT NULL,
+        MF_Google_MPN            VARCHAR(255) DEFAULT NULL,
+        MF_Google_Custom_Label_0 VARCHAR(255) DEFAULT NULL,
+        MF_Google_Custom_Label_1 VARCHAR(255) DEFAULT NULL,
+        MF_Google_Custom_Label_2 VARCHAR(255) DEFAULT NULL,
+        MF_Google_Custom_Label_3 VARCHAR(255) DEFAULT NULL,
+        MF_Google_Custom_Label_4 VARCHAR(255) DEFAULT NULL,
+        MF_Google_Size_System    VARCHAR(100) DEFAULT NULL,
+        MF_Google_Size_Type      VARCHAR(100) DEFAULT NULL
     )
     """
 
-    # ALTER TABLE per aggiungere colonna (senza IF NOT EXISTS per compatibilità MySQL)
-    ALTER_ADD_STOCK_MAGAZZINO = """
-    ALTER TABLE online_products
-    ADD COLUMN Stock_Magazzino INT DEFAULT NULL AFTER Inventory_Item_ID
-    """
+    # Lista colonne da migrare (nome, tipo, colonna precedente)
+    MIGRATION_COLUMNS = [
+        ("Stock_Magazzino", "INT DEFAULT NULL", "Inventory_Item_ID"),
+        ("Body_HTML", "LONGTEXT DEFAULT NULL", "Collections"),
+        ("Product_Images", "JSON", "Body_HTML"),
+        ("MF_Customization_Description", "TEXT DEFAULT NULL", "Product_Images"),
+        ("MF_Shoe_Details", "TEXT DEFAULT NULL", "MF_Customization_Description"),
+        ("MF_Customization_Details", "TEXT DEFAULT NULL", "MF_Shoe_Details"),
+        ("MF_O_Description", "TEXT DEFAULT NULL", "MF_Customization_Details"),
+        ("MF_Handling", "INT DEFAULT NULL", "MF_O_Description"),
+        ("MF_Google_Custom_Product", "BOOLEAN DEFAULT NULL", "MF_Handling"),
+        ("MF_Google_Age_Group", "VARCHAR(100) DEFAULT NULL", "MF_Google_Custom_Product"),
+        ("MF_Google_Condition", "VARCHAR(100) DEFAULT NULL", "MF_Google_Age_Group"),
+        ("MF_Google_Gender", "VARCHAR(100) DEFAULT NULL", "MF_Google_Condition"),
+        ("MF_Google_MPN", "VARCHAR(255) DEFAULT NULL", "MF_Google_Gender"),
+        ("MF_Google_Custom_Label_0", "VARCHAR(255) DEFAULT NULL", "MF_Google_MPN"),
+        ("MF_Google_Custom_Label_1", "VARCHAR(255) DEFAULT NULL", "MF_Google_Custom_Label_0"),
+        ("MF_Google_Custom_Label_2", "VARCHAR(255) DEFAULT NULL", "MF_Google_Custom_Label_1"),
+        ("MF_Google_Custom_Label_3", "VARCHAR(255) DEFAULT NULL", "MF_Google_Custom_Label_2"),
+        ("MF_Google_Custom_Label_4", "VARCHAR(255) DEFAULT NULL", "MF_Google_Custom_Label_3"),
+        ("MF_Google_Size_System", "VARCHAR(100) DEFAULT NULL", "MF_Google_Custom_Label_4"),
+        ("MF_Google_Size_Type", "VARCHAR(100) DEFAULT NULL", "MF_Google_Size_System"),
+    ]
 
     # DDL per storico prezzi
     DDL_PRICE_HISTORY = """
@@ -147,8 +188,9 @@ class Database:
         """Crea tabelle per sincronizzazione prodotti."""
         self.cursor.execute(self.DDL_ONLINE_PRODUCTS)
         self.cursor.execute(self.DDL_PRICE_HISTORY)
-        # Migrazione: aggiunge colonne nuove se non esistono
-        self._add_column_if_not_exists("Stock_Magazzino", "INT DEFAULT NULL", "Inventory_Item_ID")
+        # Migrazione: aggiunge tutte le colonne nuove se non esistono
+        for col_name, col_def, after_col in self.MIGRATION_COLUMNS:
+            self._add_column_if_not_exists(col_name, col_def, after_col)
         self.commit()
 
     def _add_column_if_not_exists(self, column_name: str, column_def: str, after_column: str) -> None:
@@ -235,7 +277,29 @@ class Database:
         inventory_item_id: int,
         stock_magazzino: Optional[int],
         tags: str,
-        collections: str
+        collections: str,
+        # Nuovi campi
+        body_html: Optional[str] = None,
+        product_images: Optional[str] = None,  # JSON string
+        # Metafield Prodotto
+        mf_customization_description: Optional[str] = None,
+        mf_shoe_details: Optional[str] = None,
+        mf_customization_details: Optional[str] = None,
+        mf_o_description: Optional[str] = None,
+        mf_handling: Optional[int] = None,
+        mf_google_custom_product: Optional[bool] = None,
+        # Metafield Variante (Google Shopping)
+        mf_google_age_group: Optional[str] = None,
+        mf_google_condition: Optional[str] = None,
+        mf_google_gender: Optional[str] = None,
+        mf_google_mpn: Optional[str] = None,
+        mf_google_custom_label_0: Optional[str] = None,
+        mf_google_custom_label_1: Optional[str] = None,
+        mf_google_custom_label_2: Optional[str] = None,
+        mf_google_custom_label_3: Optional[str] = None,
+        mf_google_custom_label_4: Optional[str] = None,
+        mf_google_size_system: Optional[str] = None,
+        mf_google_size_type: Optional[str] = None,
     ) -> None:
         """Inserisce o aggiorna prodotto."""
         self.cursor.execute("""
@@ -243,9 +307,20 @@ class Database:
                 Variant_id, Variant_Title, SKU, Barcode,
                 Product_id, Product_title, Product_handle, Vendor,
                 Price, Compare_AT_Price, Inventory_Item_ID,
-                Stock_Magazzino, Tags, Collections
+                Stock_Magazzino, Tags, Collections,
+                Body_HTML, Product_Images,
+                MF_Customization_Description, MF_Shoe_Details,
+                MF_Customization_Details, MF_O_Description,
+                MF_Handling, MF_Google_Custom_Product,
+                MF_Google_Age_Group, MF_Google_Condition,
+                MF_Google_Gender, MF_Google_MPN,
+                MF_Google_Custom_Label_0, MF_Google_Custom_Label_1,
+                MF_Google_Custom_Label_2, MF_Google_Custom_Label_3,
+                MF_Google_Custom_Label_4, MF_Google_Size_System,
+                MF_Google_Size_Type
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
                 Variant_Title=VALUES(Variant_Title),
                 SKU=VALUES(SKU),
@@ -259,12 +334,41 @@ class Database:
                 Inventory_Item_ID=VALUES(Inventory_Item_ID),
                 Stock_Magazzino=VALUES(Stock_Magazzino),
                 Tags=VALUES(Tags),
-                Collections=VALUES(Collections)
+                Collections=VALUES(Collections),
+                Body_HTML=VALUES(Body_HTML),
+                Product_Images=VALUES(Product_Images),
+                MF_Customization_Description=VALUES(MF_Customization_Description),
+                MF_Shoe_Details=VALUES(MF_Shoe_Details),
+                MF_Customization_Details=VALUES(MF_Customization_Details),
+                MF_O_Description=VALUES(MF_O_Description),
+                MF_Handling=VALUES(MF_Handling),
+                MF_Google_Custom_Product=VALUES(MF_Google_Custom_Product),
+                MF_Google_Age_Group=VALUES(MF_Google_Age_Group),
+                MF_Google_Condition=VALUES(MF_Google_Condition),
+                MF_Google_Gender=VALUES(MF_Google_Gender),
+                MF_Google_MPN=VALUES(MF_Google_MPN),
+                MF_Google_Custom_Label_0=VALUES(MF_Google_Custom_Label_0),
+                MF_Google_Custom_Label_1=VALUES(MF_Google_Custom_Label_1),
+                MF_Google_Custom_Label_2=VALUES(MF_Google_Custom_Label_2),
+                MF_Google_Custom_Label_3=VALUES(MF_Google_Custom_Label_3),
+                MF_Google_Custom_Label_4=VALUES(MF_Google_Custom_Label_4),
+                MF_Google_Size_System=VALUES(MF_Google_Size_System),
+                MF_Google_Size_Type=VALUES(MF_Google_Size_Type)
         """, (
             variant_id, variant_title, sku, barcode,
             product_id, product_title, product_handle, vendor,
             price, compare_at_price, inventory_item_id,
-            stock_magazzino, tags, collections
+            stock_magazzino, tags, collections,
+            body_html, product_images,
+            mf_customization_description, mf_shoe_details,
+            mf_customization_details, mf_o_description,
+            mf_handling, mf_google_custom_product,
+            mf_google_age_group, mf_google_condition,
+            mf_google_gender, mf_google_mpn,
+            mf_google_custom_label_0, mf_google_custom_label_1,
+            mf_google_custom_label_2, mf_google_custom_label_3,
+            mf_google_custom_label_4, mf_google_size_system,
+            mf_google_size_type
         ))
 
     def delete_variants(self, variant_ids: Set[int]) -> int:
