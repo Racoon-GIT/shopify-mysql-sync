@@ -8,10 +8,14 @@ Funzionalità:
 - Sincronizza varianti su tabella MySQL online_products
 - Traccia storico variazioni prezzi su price_history
 - Rimuove varianti non più presenti su Shopify
+- Sincronizza metafield prodotto e variante
+- Sincronizza immagini prodotto (JSON)
+- Sincronizza body HTML
 """
 
 import sys
 from decimal import Decimal
+from typing import Dict, Any
 
 from src.config import Config, log
 from src.shopify_client import ShopifyClient
@@ -96,10 +100,31 @@ def sync_products(config: Config, client: ShopifyClient, db: Database) -> None:
         )
         log(f"✅ Stock recuperato per {len([v for v in inventory_map.values() if v is not None])} varianti")
 
+    # Cache per metafield prodotto (per non richiederli per ogni variante)
+    product_metafields_cache: Dict[int, Dict[str, Any]] = {}
+    # Cache per metafield variante
+    variant_metafields_cache: Dict[int, Dict[str, Any]] = {}
+
+    log("🏷️ Inizio sincronizzazione con metafield...")
+
     # Ora sincronizza i prodotti
     for product in products_to_sync:
+        product_id = product["id"]
         tags_string = product.get("tags", "")
-        collections = ", ".join(collection_map.get(product["id"], []))
+        collections = ", ".join(collection_map.get(product_id, []))
+
+        # Body HTML del prodotto
+        body_html = product.get("body_html")
+
+        # Immagini prodotto (JSON)
+        product_images_json = ShopifyClient.build_images_json(product)
+
+        # Recupera metafield prodotto (una volta per prodotto)
+        if product_id not in product_metafields_cache:
+            raw_mf = client.get_product_metafields(product_id)
+            product_metafields_cache[product_id] = ShopifyClient.extract_product_metafields(raw_mf)
+
+        product_mf = product_metafields_cache[product_id]
 
         ins_count = 0
         upd_count = 0
@@ -115,6 +140,13 @@ def sync_products(config: Config, client: ShopifyClient, db: Database) -> None:
             inventory_item_id = variant.get("inventory_item_id", 0)
             stock_magazzino = inventory_map.get(inventory_item_id)
 
+            # Recupera metafield variante
+            if vid not in variant_metafields_cache:
+                raw_vmf = client.get_variant_metafields(vid)
+                variant_metafields_cache[vid] = ShopifyClient.extract_variant_metafields(raw_vmf)
+
+            variant_mf = variant_metafields_cache[vid]
+
             # Verifica se esiste e se i prezzi sono cambiati
             existing = db.get_variant_prices(vid)
             if existing:
@@ -125,13 +157,13 @@ def sync_products(config: Config, client: ShopifyClient, db: Database) -> None:
             else:
                 ins_count += 1
 
-            # Upsert
+            # Upsert con tutti i nuovi campi
             db.upsert_product(
                 variant_id=vid,
                 variant_title=variant.get("title", ""),
                 sku=variant.get("sku", ""),
                 barcode=variant.get("barcode", ""),
-                product_id=product["id"],
+                product_id=product_id,
                 product_title=product.get("title", ""),
                 product_handle=product.get("handle", ""),
                 vendor=product.get("vendor", ""),
@@ -140,7 +172,29 @@ def sync_products(config: Config, client: ShopifyClient, db: Database) -> None:
                 inventory_item_id=inventory_item_id,
                 stock_magazzino=stock_magazzino,
                 tags=tags_string,
-                collections=collections
+                collections=collections,
+                # Nuovi campi
+                body_html=body_html,
+                product_images=product_images_json,
+                # Metafield Prodotto
+                mf_customization_description=product_mf.get("customization_description"),
+                mf_shoe_details=product_mf.get("shoe_details"),
+                mf_customization_details=product_mf.get("customization_details"),
+                mf_o_description=product_mf.get("o_description"),
+                mf_handling=product_mf.get("handling"),
+                mf_google_custom_product=product_mf.get("google_custom_product"),
+                # Metafield Variante (Google Shopping)
+                mf_google_age_group=variant_mf.get("google_age_group"),
+                mf_google_condition=variant_mf.get("google_condition"),
+                mf_google_gender=variant_mf.get("google_gender"),
+                mf_google_mpn=variant_mf.get("google_mpn"),
+                mf_google_custom_label_0=variant_mf.get("google_custom_label_0"),
+                mf_google_custom_label_1=variant_mf.get("google_custom_label_1"),
+                mf_google_custom_label_2=variant_mf.get("google_custom_label_2"),
+                mf_google_custom_label_3=variant_mf.get("google_custom_label_3"),
+                mf_google_custom_label_4=variant_mf.get("google_custom_label_4"),
+                mf_google_size_system=variant_mf.get("google_size_system"),
+                mf_google_size_type=variant_mf.get("google_size_type"),
             )
 
         # Commit per prodotto (ottimizzato rispetto a singola variante)

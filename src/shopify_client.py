@@ -469,3 +469,163 @@ class ShopifyClient:
                     result[item_id] = None
 
         return result
+
+    # --- Metodi per Metafield ---
+
+    def get_product_metafields(self, product_id: int) -> Dict[str, Any]:
+        """
+        Recupera tutti i metafield di un prodotto.
+
+        Args:
+            product_id: ID prodotto
+
+        Returns:
+            Dict[str, Any]: {namespace.key: value}
+        """
+        result = {}
+        try:
+            response = self.get(f"products/{product_id}/metafields.json")
+            metafields = response.json().get("metafields", [])
+
+            for mf in metafields:
+                key = f"{mf['namespace']}.{mf['key']}"
+                result[key] = mf.get("value")
+
+        except Exception as e:
+            log(f"⚠️ Errore recupero metafield prodotto {product_id}: {e}")
+
+        return result
+
+    def get_variant_metafields(self, variant_id: int) -> Dict[str, Any]:
+        """
+        Recupera tutti i metafield di una variante.
+
+        Args:
+            variant_id: ID variante
+
+        Returns:
+            Dict[str, Any]: {namespace.key: value}
+        """
+        result = {}
+        try:
+            response = self.get(f"variants/{variant_id}/metafields.json")
+            metafields = response.json().get("metafields", [])
+
+            for mf in metafields:
+                key = f"{mf['namespace']}.{mf['key']}"
+                result[key] = mf.get("value")
+
+        except Exception as e:
+            log(f"⚠️ Errore recupero metafield variante {variant_id}: {e}")
+
+        return result
+
+    @staticmethod
+    def extract_product_metafields(metafields: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Estrae i metafield prodotto rilevanti in un dizionario normalizzato.
+
+        Args:
+            metafields: Dizionario {namespace.key: value}
+
+        Returns:
+            Dict con chiavi normalizzate per DB
+        """
+        # Mapping namespace.key -> nome campo DB
+        mapping = {
+            "custom.customization_description": "customization_description",
+            "custom.shoe_details": "shoe_details",
+            "custom.customization_details": "customization_details",
+            "custom.o_description": "o_description",
+            "custom.handling": "handling",
+            "mm-google-shopping.is_custom_product": "google_custom_product",
+        }
+
+        result = {}
+        for mf_key, db_key in mapping.items():
+            value = metafields.get(mf_key)
+            if value is not None:
+                # Converti handling in int se presente
+                if db_key == "handling":
+                    try:
+                        value = int(value)
+                    except (ValueError, TypeError):
+                        value = None
+                # Converti boolean per google_custom_product
+                elif db_key == "google_custom_product":
+                    value = str(value).lower() in ("true", "1", "yes")
+                result[db_key] = value
+
+        return result
+
+    @staticmethod
+    def extract_variant_metafields(metafields: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Estrae i metafield variante Google Shopping in un dizionario normalizzato.
+
+        Args:
+            metafields: Dizionario {namespace.key: value}
+
+        Returns:
+            Dict con chiavi normalizzate per DB
+        """
+        # Mapping namespace.key -> nome campo DB
+        mapping = {
+            "mm-google-shopping.age_group": "google_age_group",
+            "mm-google-shopping.condition": "google_condition",
+            "mm-google-shopping.gender": "google_gender",
+            "mm-google-shopping.mpn": "google_mpn",
+            "mm-google-shopping.custom_label_0": "google_custom_label_0",
+            "mm-google-shopping.custom_label_1": "google_custom_label_1",
+            "mm-google-shopping.custom_label_2": "google_custom_label_2",
+            "mm-google-shopping.custom_label_3": "google_custom_label_3",
+            "mm-google-shopping.custom_label_4": "google_custom_label_4",
+            "mm-google-shopping.size_system": "google_size_system",
+            "mm-google-shopping.size_type": "google_size_type",
+        }
+
+        result = {}
+        for mf_key, db_key in mapping.items():
+            value = metafields.get(mf_key)
+            if value is not None:
+                result[db_key] = value
+
+        return result
+
+    @staticmethod
+    def build_images_json(product: Dict[str, Any]) -> str:
+        """
+        Costruisce JSON delle immagini prodotto.
+
+        Args:
+            product: Dati prodotto da Shopify
+
+        Returns:
+            str: JSON string con struttura immagini
+        """
+        images = product.get("images", [])
+        image_data = {
+            "count": len(images),
+            "images": []
+        }
+
+        for img in images:
+            # Estrai nome file da URL
+            src = img.get("src", "")
+            filename = src.split("/")[-1].split("?")[0] if src else ""
+
+            image_data["images"].append({
+                "position": img.get("position"),
+                "src": filename,
+                "alt": img.get("alt") or "",
+                "width": img.get("width"),
+                "height": img.get("height"),
+                "id": img.get("id")
+            })
+
+        # Featured image
+        if product.get("image"):
+            featured_src = product["image"].get("src", "")
+            image_data["featured"] = featured_src.split("/")[-1].split("?")[0] if featured_src else ""
+
+        return json_module.dumps(image_data, ensure_ascii=False)
