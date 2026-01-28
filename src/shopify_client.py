@@ -893,6 +893,11 @@ class ShopifyClient:
             "mm-google-shopping.custom_label_4": "google_custom_label_4",
             "mm-google-shopping.size_system": "google_size_system",
             "mm-google-shopping.size_type": "google_size_type",
+            # Campi Google Merchant Center
+            "mm-google-shopping.color": "google_color",
+            "mm-google-shopping.size": "google_size",
+            "mm-google-shopping.material": "google_material",
+            "mm-google-shopping.google_product_category": "google_product_category",
         }
 
         result = {}
