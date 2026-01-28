@@ -126,7 +126,7 @@ class Config:
 
     def api_url(self, endpoint: str) -> str:
         """
-        Costruisce URL completo per endpoint Shopify.
+        Costruisce URL completo per endpoint REST Shopify.
 
         Args:
             endpoint: Endpoint relativo (es. "products.json")
@@ -135,3 +135,12 @@ class Config:
             str: URL completo
         """
         return f"https://{self.shop_domain}/admin/api/{self.api_version}/{endpoint}"
+
+    def graphql_url(self) -> str:
+        """
+        Costruisce URL per GraphQL Admin API.
+
+        Returns:
+            str: URL GraphQL endpoint
+        """
+        return f"https://{self.shop_domain}/admin/api/{self.api_version}/graphql.json"
