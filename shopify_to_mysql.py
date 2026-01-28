@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 # shopify_to_mysql.py
 """
-Sincronizzazione prodotti Shopify -> MySQL.
+Sincronizzazione prodotti Shopify -> MySQL via GraphQL.
 
 Funzionalità:
 - Recupera tutti i prodotti attivi da Shopify (filtrati per tag specifici)
+- Usa GraphQL per efficienza (prodotti + varianti + metafield in una chiamata)
 - Sincronizza varianti su tabella MySQL online_products
 - Traccia storico variazioni prezzi su price_history
 - Rimuove varianti non più presenti su Shopify
 - Sincronizza metafield prodotto e variante
 - Sincronizza immagini prodotto (JSON)
 - Sincronizza body HTML
+
+Ottimizzazione rispetto a REST:
+- REST: ~9000+ chiamate API (1 per prodotto metafield + 1 per variante metafield)
+- GraphQL: ~15-20 chiamate (50 prodotti per pagina con tutto incluso)
 """
 
 import sys
@@ -27,7 +32,7 @@ def is_shoe(product: dict, valid_tags: set) -> bool:
     Verifica se il prodotto è una calzatura in base ai tag.
 
     Args:
-        product: Dati prodotto Shopify
+        product: Dati prodotto Shopify (normalizzato da GraphQL)
         valid_tags: Set di tag validi
 
     Returns:
@@ -38,9 +43,10 @@ def is_shoe(product: dict, valid_tags: set) -> bool:
     return any(tag in valid_tags for tag in tags)
 
 
-def sync_products(config: Config, client: ShopifyClient, db: Database) -> None:
+def sync_products_graphql(config: Config, client: ShopifyClient, db: Database) -> None:
     """
-    Esegue la sincronizzazione completa dei prodotti.
+    Esegue la sincronizzazione completa dei prodotti usando GraphQL.
+    Molto più efficiente di REST perché recupera tutto in una query.
 
     Args:
         config: Configurazione
@@ -53,62 +59,25 @@ def sync_products(config: Config, client: ShopifyClient, db: Database) -> None:
     # Recupera varianti esistenti
     existing_ids = db.get_existing_variant_ids()
 
-    # Costruisce mappa collezioni
+    # Costruisce mappa collezioni (ancora via REST, ma sono poche chiamate)
     collection_map = client.build_product_collections_map()
 
-    # Recupera ID location "Magazzino"
-    log("📍 Recupero ID location 'Magazzino'...")
-    magazzino_location_id = client.get_location_id_by_name("Magazzino")
-    if magazzino_location_id:
-        log(f"✅ Location 'Magazzino' trovata: ID {magazzino_location_id}")
-    else:
-        log("⚠️ Location 'Magazzino' non trovata - Stock_Magazzino sarà NULL")
-
     # Contatori
-    page = 0
+    product_count = 0
     tot_ins = 0
     tot_upd = 0
     seen_ids = set()
 
-    # Raccogli prima tutti i prodotti filtrati per recuperare inventory in batch
-    log("🔄 Raccolta prodotti e varianti...")
-    products_to_sync = []
+    log("🚀 Avvio sincronizzazione via GraphQL...")
+    log("📡 Recupero prodotti con varianti, metafield e inventory inclusi...")
 
-    for product in client.get_products(status="active"):
+    # Usa GraphQL per recuperare tutto in una volta
+    # La location "Magazzino" è gestita direttamente nella query GraphQL
+    for product in client.get_products_graphql(status="active", location_name="Magazzino"):
         # Filtro per tag
         if not is_shoe(product, config.VALID_TAGS):
             continue
-        products_to_sync.append(product)
 
-    log(f"📦 Trovati {len(products_to_sync)} prodotti da sincronizzare")
-
-    # Raccogli tutti gli inventory_item_id per batch query
-    all_inventory_item_ids = []
-    for product in products_to_sync:
-        for variant in product.get("variants", []):
-            inv_id = variant.get("inventory_item_id")
-            if inv_id:
-                all_inventory_item_ids.append(inv_id)
-
-    # Recupera inventory per location Magazzino in batch
-    inventory_map = {}
-    if magazzino_location_id and all_inventory_item_ids:
-        log(f"📊 Recupero stock Magazzino per {len(all_inventory_item_ids)} varianti...")
-        inventory_map = client.build_inventory_map_for_location(
-            all_inventory_item_ids,
-            magazzino_location_id
-        )
-        log(f"✅ Stock recuperato per {len([v for v in inventory_map.values() if v is not None])} varianti")
-
-    # Cache per metafield prodotto (per non richiederli per ogni variante)
-    product_metafields_cache: Dict[int, Dict[str, Any]] = {}
-    # Cache per metafield variante
-    variant_metafields_cache: Dict[int, Dict[str, Any]] = {}
-
-    log("🏷️ Inizio sincronizzazione con metafield...")
-
-    # Ora sincronizza i prodotti
-    for product in products_to_sync:
         product_id = product["id"]
         tags_string = product.get("tags", "")
         collections = ", ".join(collection_map.get(product_id, []))
@@ -116,15 +85,12 @@ def sync_products(config: Config, client: ShopifyClient, db: Database) -> None:
         # Body HTML del prodotto
         body_html = product.get("body_html")
 
-        # Immagini prodotto (JSON)
+        # Immagini prodotto (JSON) - usa il metodo esistente
         product_images_json = ShopifyClient.build_images_json(product)
 
-        # Recupera metafield prodotto (una volta per prodotto)
-        if product_id not in product_metafields_cache:
-            raw_mf = client.get_product_metafields(product_id)
-            product_metafields_cache[product_id] = ShopifyClient.extract_product_metafields(raw_mf)
-
-        product_mf = product_metafields_cache[product_id]
+        # Metafield prodotto (già inclusi nella risposta GraphQL)
+        raw_product_mf = product.get("metafields", {})
+        product_mf = ShopifyClient.extract_product_metafields(raw_product_mf)
 
         ins_count = 0
         upd_count = 0
@@ -136,16 +102,13 @@ def sync_products(config: Config, client: ShopifyClient, db: Database) -> None:
             price = Decimal(variant["price"] or "0")
             compare = Decimal(variant["compare_at_price"] or "0")
 
-            # Recupera stock Magazzino dalla mappa
+            # Stock Magazzino (già incluso nella risposta GraphQL)
             inventory_item_id = variant.get("inventory_item_id", 0)
-            stock_magazzino = inventory_map.get(inventory_item_id)
+            stock_magazzino = variant.get("stock_for_location")
 
-            # Recupera metafield variante
-            if vid not in variant_metafields_cache:
-                raw_vmf = client.get_variant_metafields(vid)
-                variant_metafields_cache[vid] = ShopifyClient.extract_variant_metafields(raw_vmf)
-
-            variant_mf = variant_metafields_cache[vid]
+            # Metafield variante (già inclusi nella risposta GraphQL)
+            raw_variant_mf = variant.get("metafields", {})
+            variant_mf = ShopifyClient.extract_variant_metafields(raw_variant_mf)
 
             # Verifica se esiste e se i prezzi sono cambiati
             existing = db.get_variant_prices(vid)
@@ -157,7 +120,7 @@ def sync_products(config: Config, client: ShopifyClient, db: Database) -> None:
             else:
                 ins_count += 1
 
-            # Upsert con tutti i nuovi campi
+            # Upsert con tutti i campi
             db.upsert_product(
                 variant_id=vid,
                 variant_title=variant.get("title", ""),
@@ -197,15 +160,17 @@ def sync_products(config: Config, client: ShopifyClient, db: Database) -> None:
                 mf_google_size_type=variant_mf.get("google_size_type"),
             )
 
-        # Commit per prodotto (ottimizzato rispetto a singola variante)
+        # Commit per prodotto
         db.commit()
         tot_ins += ins_count
         tot_upd += upd_count
 
         # Log periodico
-        page += 1
-        if config.debug and page % 10 == 0:
-            log(f"[Prodotti elaborati: {page}] ➕ Insert: {tot_ins} | ↺ Update: {tot_upd}")
+        product_count += 1
+        if config.debug and product_count % 50 == 0:
+            log(f"[Prodotti elaborati: {product_count}] ➕ Insert: {tot_ins} | ↺ Update: {tot_upd}")
+
+    log(f"📦 Elaborati {product_count} prodotti filtrati")
 
     # Rimozione varianti scomparse
     to_delete = existing_ids - seen_ids
@@ -227,7 +192,8 @@ def main() -> None:
         client = ShopifyClient(config)
 
         with Database(config) as db:
-            sync_products(config, client, db)
+            # Usa GraphQL per efficienza massima
+            sync_products_graphql(config, client, db)
 
     except Exception as exc:
         log(f"❌ Errore fatale: {exc}")

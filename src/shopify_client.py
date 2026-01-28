@@ -1,11 +1,12 @@
 # src/shopify_client.py
 """
 Client Shopify con gestione robusta di rate limiting e retry.
+Supporta sia REST API che GraphQL Admin API.
 """
 
 import time
 import json as json_module  # Evita shadowing con parametro 'json'
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Generator
 from collections import defaultdict
 
 import requests
@@ -14,13 +15,107 @@ from .config import Config, log
 
 
 class ShopifyClient:
-    """Client per Shopify Admin REST API con retry e rate limiting."""
+    """Client per Shopify Admin REST e GraphQL API con retry e rate limiting."""
 
     # Codici HTTP che richiedono retry
     RETRYABLE_STATUS_CODES = {429, 502, 503, 504}
 
     # Sleep tra chiamate consecutive (Shopify permette 2 req/sec)
     DEFAULT_SLEEP = 0.5
+
+    # Query GraphQL per prodotti con varianti, metafield e immagini
+    GRAPHQL_PRODUCTS_QUERY = """
+    query GetProducts($cursor: String, $query: String) {
+        products(first: 50, after: $cursor, query: $query) {
+            pageInfo {
+                hasNextPage
+                endCursor
+            }
+            edges {
+                node {
+                    id
+                    legacyResourceId
+                    title
+                    handle
+                    vendor
+                    tags
+                    descriptionHtml
+                    status
+                    featuredImage {
+                        url
+                        altText
+                        width
+                        height
+                        id
+                    }
+                    images(first: 20) {
+                        edges {
+                            node {
+                                id
+                                url
+                                altText
+                                width
+                                height
+                            }
+                        }
+                    }
+                    metafields(first: 20) {
+                        edges {
+                            node {
+                                namespace
+                                key
+                                value
+                                type
+                            }
+                        }
+                    }
+                    variants(first: 100) {
+                        edges {
+                            node {
+                                id
+                                legacyResourceId
+                                title
+                                sku
+                                barcode
+                                price
+                                compareAtPrice
+                                inventoryItem {
+                                    id
+                                    legacyResourceId
+                                    inventoryLevels(first: 10) {
+                                        edges {
+                                            node {
+                                                location {
+                                                    id
+                                                    legacyResourceId
+                                                    name
+                                                }
+                                                quantities(names: ["available"]) {
+                                                    name
+                                                    quantity
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                metafields(first: 20) {
+                                    edges {
+                                        node {
+                                            namespace
+                                            key
+                                            value
+                                            type
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    """
 
     def __init__(self, config: Config):
         """
@@ -155,6 +250,225 @@ class ShopifyClient:
         response = self._request("DELETE", endpoint)
         time.sleep(self.DEFAULT_SLEEP)
         return response
+
+    # --- GraphQL Methods ---
+
+    def graphql(
+        self,
+        query: str,
+        variables: Optional[Dict[str, Any]] = None,
+        max_retries: int = 5
+    ) -> Dict[str, Any]:
+        """
+        Esegue una query GraphQL Admin API.
+
+        Args:
+            query: Query GraphQL
+            variables: Variabili della query
+            max_retries: Numero massimo di tentativi
+
+        Returns:
+            Dict: Risposta JSON (campo 'data')
+
+        Raises:
+            Exception: Se la query fallisce
+        """
+        url = self.config.graphql_url()
+        payload = {"query": query}
+        if variables:
+            payload["variables"] = variables
+
+        for attempt in range(max_retries):
+            try:
+                response = self._session.post(url, json=payload)
+
+                # Rate limit o errore transitorio
+                if response.status_code in self.RETRYABLE_STATUS_CODES:
+                    wait_time = self._calculate_wait_time(response, attempt)
+                    log(f"⏳ GraphQL Retry {attempt + 1}/{max_retries} - Status {response.status_code} - Attendo {wait_time:.1f}s...")
+                    time.sleep(wait_time)
+                    continue
+
+                if response.status_code >= 400:
+                    self._log_error(response)
+                    response.raise_for_status()
+
+                result = response.json()
+
+                # Controlla errori GraphQL
+                if "errors" in result:
+                    errors = result["errors"]
+                    # Controlla se è throttled
+                    for err in errors:
+                        if "THROTTLED" in str(err.get("extensions", {})):
+                            cost = err.get("extensions", {}).get("cost", {})
+                            wait_time = cost.get("requestedQueryCost", 10) / 50  # ~50 points/sec
+                            log(f"⏳ GraphQL throttled, attendo {wait_time:.1f}s...")
+                            time.sleep(max(wait_time, 2))
+                            continue
+                    # Altri errori
+                    error_msgs = [e.get("message", str(e)) for e in errors]
+                    raise Exception(f"GraphQL errors: {'; '.join(error_msgs)}")
+
+                return result.get("data", {})
+
+            except requests.exceptions.ConnectionError as e:
+                wait_time = 2 ** attempt
+                log(f"⚠️ Errore connessione GraphQL, retry {attempt + 1}/{max_retries} in {wait_time}s: {e}")
+                time.sleep(wait_time)
+                continue
+
+        raise Exception(f"❌ Query GraphQL fallita dopo {max_retries} tentativi")
+
+    def get_products_graphql(
+        self,
+        status: str = "active",
+        location_name: Optional[str] = None
+    ) -> Generator[Dict[str, Any], None, None]:
+        """
+        Generatore che recupera prodotti via GraphQL con metafield e varianti inclusi.
+        Molto più efficiente di REST (1 chiamata vs N chiamate per metafield).
+
+        Args:
+            status: Stato prodotti (active, draft, archived)
+            location_name: Nome location per filtrare inventory (es. "Magazzino")
+
+        Yields:
+            Dict: Prodotto normalizzato con struttura simile a REST + metafield
+        """
+        cursor = None
+        page = 0
+        query_filter = f"status:{status}"
+
+        while True:
+            page += 1
+            variables = {"cursor": cursor, "query": query_filter}
+
+            log(f"📡 GraphQL: Recupero pagina {page}...")
+            data = self.graphql(self.GRAPHQL_PRODUCTS_QUERY, variables)
+
+            products_data = data.get("products", {})
+            edges = products_data.get("edges", [])
+            page_info = products_data.get("pageInfo", {})
+
+            for edge in edges:
+                node = edge["node"]
+                yield self._normalize_graphql_product(node, location_name)
+
+            # Paginazione
+            if not page_info.get("hasNextPage"):
+                break
+            cursor = page_info.get("endCursor")
+
+    def _normalize_graphql_product(
+        self,
+        node: Dict[str, Any],
+        location_name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Normalizza risposta GraphQL in formato compatibile con REST.
+
+        Args:
+            node: Nodo prodotto GraphQL
+            location_name: Nome location per filtrare stock
+
+        Returns:
+            Dict: Prodotto normalizzato
+        """
+        # Estrai ID numerico da GID
+        product_id = int(node["legacyResourceId"])
+
+        # Immagini
+        images = []
+        for idx, img_edge in enumerate(node.get("images", {}).get("edges", [])):
+            img = img_edge["node"]
+            # Estrai ID numerico da GID immagine
+            img_gid = img.get("id", "")
+            img_id = int(img_gid.split("/")[-1]) if img_gid else None
+
+            images.append({
+                "id": img_id,
+                "position": idx + 1,
+                "src": img.get("url", ""),
+                "alt": img.get("altText") or "",
+                "width": img.get("width"),
+                "height": img.get("height")
+            })
+
+        # Featured image
+        featured = node.get("featuredImage")
+        featured_image = None
+        if featured:
+            featured_image = {
+                "src": featured.get("url", ""),
+                "alt": featured.get("altText") or "",
+                "width": featured.get("width"),
+                "height": featured.get("height")
+            }
+
+        # Metafield prodotto
+        product_metafields = {}
+        for mf_edge in node.get("metafields", {}).get("edges", []):
+            mf = mf_edge["node"]
+            key = f"{mf['namespace']}.{mf['key']}"
+            product_metafields[key] = mf.get("value")
+
+        # Varianti
+        variants = []
+        for var_edge in node.get("variants", {}).get("edges", []):
+            var = var_edge["node"]
+            variant_id = int(var["legacyResourceId"])
+
+            # Inventory item
+            inv_item = var.get("inventoryItem", {})
+            inventory_item_id = int(inv_item.get("legacyResourceId", 0)) if inv_item.get("legacyResourceId") else 0
+
+            # Stock per location specifica
+            stock_for_location = None
+            if location_name:
+                for level_edge in inv_item.get("inventoryLevels", {}).get("edges", []):
+                    level = level_edge["node"]
+                    loc = level.get("location", {})
+                    if loc.get("name", "").lower() == location_name.lower():
+                        quantities = level.get("quantities", [])
+                        for q in quantities:
+                            if q.get("name") == "available":
+                                stock_for_location = q.get("quantity")
+                                break
+                        break
+
+            # Metafield variante
+            variant_metafields = {}
+            for mf_edge in var.get("metafields", {}).get("edges", []):
+                mf = mf_edge["node"]
+                key = f"{mf['namespace']}.{mf['key']}"
+                variant_metafields[key] = mf.get("value")
+
+            variants.append({
+                "id": variant_id,
+                "title": var.get("title", ""),
+                "sku": var.get("sku") or "",
+                "barcode": var.get("barcode") or "",
+                "price": var.get("price", "0"),
+                "compare_at_price": var.get("compareAtPrice") or "0",
+                "inventory_item_id": inventory_item_id,
+                "stock_for_location": stock_for_location,
+                "metafields": variant_metafields
+            })
+
+        return {
+            "id": product_id,
+            "title": node.get("title", ""),
+            "handle": node.get("handle", ""),
+            "vendor": node.get("vendor", ""),
+            "tags": ", ".join(node.get("tags", [])),
+            "body_html": node.get("descriptionHtml"),
+            "status": node.get("status", "").lower(),
+            "images": images,
+            "image": featured_image,
+            "variants": variants,
+            "metafields": product_metafields
+        }
 
     # --- Metodi di utilità ---
 
