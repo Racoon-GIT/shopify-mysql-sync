@@ -20,14 +20,14 @@ Ottimizzazione rispetto a REST:
 
 import sys
 from decimal import Decimal
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from src.config import Config, log
 from src.shopify_client import ShopifyClient
 from src.db import Database
 
 
-def sanitize_html(html: str | None) -> str | None:
+def sanitize_html(html: Optional[str]) -> Optional[str]:
     """
     Sanifica contenuto HTML rimuovendo BOM e caratteri problematici.
 
@@ -128,10 +128,6 @@ def sync_products_graphql(config: Config, client: ShopifyClient, db: Database) -
             inventory_item_id = variant.get("inventory_item_id", 0)
             stock_magazzino = variant.get("stock_for_location")
 
-            # Metafield variante (già inclusi nella risposta GraphQL)
-            raw_variant_mf = variant.get("metafields", {})
-            variant_mf = ShopifyClient.extract_variant_metafields(raw_variant_mf)
-
             # Verifica se esiste e se i prezzi sono cambiati
             existing = db.get_variant_prices(vid)
             if existing:
@@ -168,23 +164,23 @@ def sync_products_graphql(config: Config, client: ShopifyClient, db: Database) -
                 mf_o_description=product_mf.get("o_description"),
                 mf_handling=product_mf.get("handling"),
                 mf_google_custom_product=product_mf.get("google_custom_product"),
-                # Metafield Variante (Google Shopping)
-                mf_google_age_group=variant_mf.get("google_age_group"),
-                mf_google_condition=variant_mf.get("google_condition"),
-                mf_google_gender=variant_mf.get("google_gender"),
-                mf_google_mpn=variant_mf.get("google_mpn"),
-                mf_google_custom_label_0=variant_mf.get("google_custom_label_0"),
-                mf_google_custom_label_1=variant_mf.get("google_custom_label_1"),
-                mf_google_custom_label_2=variant_mf.get("google_custom_label_2"),
-                mf_google_custom_label_3=variant_mf.get("google_custom_label_3"),
-                mf_google_custom_label_4=variant_mf.get("google_custom_label_4"),
-                mf_google_size_system=variant_mf.get("google_size_system"),
-                mf_google_size_type=variant_mf.get("google_size_type"),
+                # Metafield Google Shopping (a livello prodotto, applicati a tutte le varianti)
+                mf_google_age_group=product_mf.get("google_age_group"),
+                mf_google_condition=product_mf.get("google_condition"),
+                mf_google_gender=product_mf.get("google_gender"),
+                mf_google_mpn=product_mf.get("google_mpn"),
+                mf_google_custom_label_0=product_mf.get("google_custom_label_0"),
+                mf_google_custom_label_1=product_mf.get("google_custom_label_1"),
+                mf_google_custom_label_2=product_mf.get("google_custom_label_2"),
+                mf_google_custom_label_3=product_mf.get("google_custom_label_3"),
+                mf_google_custom_label_4=product_mf.get("google_custom_label_4"),
+                mf_google_size_system=product_mf.get("google_size_system"),
+                mf_google_size_type=product_mf.get("google_size_type"),
                 # Campi Google Merchant Center
-                mf_google_color=variant_mf.get("google_color"),
-                mf_google_size=variant_mf.get("google_size"),
-                mf_google_material=variant_mf.get("google_material"),
-                mf_google_product_category=variant_mf.get("google_product_category"),
+                mf_google_color=product_mf.get("google_color"),
+                mf_google_size=product_mf.get("google_size"),
+                mf_google_material=product_mf.get("google_material"),
+                mf_google_product_category=product_mf.get("google_product_category"),
             )
 
         # Commit per prodotto
