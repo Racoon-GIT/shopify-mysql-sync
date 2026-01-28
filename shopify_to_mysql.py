@@ -15,7 +15,7 @@ Funzionalità:
 
 Ottimizzazione rispetto a REST:
 - REST: ~9000+ chiamate API (1 per prodotto metafield + 1 per variante metafield)
-- GraphQL: ~15-20 chiamate (50 prodotti per pagina con tutto incluso)
+- GraphQL: ~75 chiamate (10 prodotti per pagina con tutto incluso, rispetta limite 1000 punti)
 """
 
 import sys

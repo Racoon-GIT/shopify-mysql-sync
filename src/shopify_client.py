@@ -24,9 +24,11 @@ class ShopifyClient:
     DEFAULT_SLEEP = 0.5
 
     # Query GraphQL per prodotti con varianti, metafield e immagini
+    # Limite: 10 prodotti per pagina per restare sotto 1000 punti di costo
+    # Costo stimato: ~30 punti base + (10 prod × ~80 punti) = ~830 punti
     GRAPHQL_PRODUCTS_QUERY = """
     query GetProducts($cursor: String, $query: String) {
-        products(first: 50, after: $cursor, query: $query) {
+        products(first: 10, after: $cursor, query: $query) {
             pageInfo {
                 hasNextPage
                 endCursor
@@ -46,9 +48,8 @@ class ShopifyClient:
                         altText
                         width
                         height
-                        id
                     }
-                    images(first: 20) {
+                    images(first: 10) {
                         edges {
                             node {
                                 id
@@ -59,17 +60,16 @@ class ShopifyClient:
                             }
                         }
                     }
-                    metafields(first: 20) {
+                    metafields(first: 10) {
                         edges {
                             node {
                                 namespace
                                 key
                                 value
-                                type
                             }
                         }
                     }
-                    variants(first: 100) {
+                    variants(first: 50) {
                         edges {
                             node {
                                 id
@@ -82,12 +82,10 @@ class ShopifyClient:
                                 inventoryItem {
                                     id
                                     legacyResourceId
-                                    inventoryLevels(first: 10) {
+                                    inventoryLevels(first: 5) {
                                         edges {
                                             node {
                                                 location {
-                                                    id
-                                                    legacyResourceId
                                                     name
                                                 }
                                                 quantities(names: ["available"]) {
@@ -98,13 +96,12 @@ class ShopifyClient:
                                         }
                                     }
                                 }
-                                metafields(first: 20) {
+                                metafields(first: 15) {
                                     edges {
                                         node {
                                             namespace
                                             key
                                             value
-                                            type
                                         }
                                     }
                                 }
