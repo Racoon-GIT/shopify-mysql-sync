@@ -27,6 +27,28 @@ from src.shopify_client import ShopifyClient
 from src.db import Database
 
 
+def sanitize_html(html: str | None) -> str | None:
+    """
+    Sanifica contenuto HTML rimuovendo BOM e caratteri problematici.
+
+    Args:
+        html: Contenuto HTML da sanificare
+
+    Returns:
+        str | None: HTML sanificato o None
+    """
+    if html is None:
+        return None
+
+    # Rimuove BOM UTF-8 (byte order mark)
+    html = html.replace('\ufeff', '')
+
+    # Rimuove anche la versione byte del BOM se presente come stringa
+    html = html.lstrip('\xef\xbb\xbf')
+
+    return html
+
+
 def is_shoe(product: dict, valid_tags: set) -> bool:
     """
     Verifica se il prodotto è una calzatura in base ai tag.
@@ -82,8 +104,8 @@ def sync_products_graphql(config: Config, client: ShopifyClient, db: Database) -
         tags_string = product.get("tags", "")
         collections = ", ".join(collection_map.get(product_id, []))
 
-        # Body HTML del prodotto
-        body_html = product.get("body_html")
+        # Body HTML del prodotto (sanificato per rimuovere BOM)
+        body_html = sanitize_html(product.get("body_html"))
 
         # Immagini prodotto (JSON) - usa il metodo esistente
         product_images_json = ShopifyClient.build_images_json(product)
