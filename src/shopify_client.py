@@ -60,7 +60,7 @@ class ShopifyClient:
                             }
                         }
                     }
-                    metafields(first: 10) {
+                    metafields(first: 25) {
                         edges {
                             node {
                                 namespace
@@ -849,7 +849,23 @@ class ShopifyClient:
             "custom.customization_details": "customization_details",
             "custom.o_description": "o_description",
             "custom.handling": "handling",
-            "mm-google-shopping.is_custom_product": "google_custom_product",
+            "mm-google-shopping.custom_product": "google_custom_product",
+            # Metafield Google Shopping (a livello prodotto, non variante!)
+            "mm-google-shopping.age_group": "google_age_group",
+            "mm-google-shopping.condition": "google_condition",
+            "mm-google-shopping.gender": "google_gender",
+            "mm-google-shopping.mpn": "google_mpn",
+            "mm-google-shopping.custom_label_0": "google_custom_label_0",
+            "mm-google-shopping.custom_label_1": "google_custom_label_1",
+            "mm-google-shopping.custom_label_2": "google_custom_label_2",
+            "mm-google-shopping.custom_label_3": "google_custom_label_3",
+            "mm-google-shopping.custom_label_4": "google_custom_label_4",
+            "mm-google-shopping.size_system": "google_size_system",
+            "mm-google-shopping.size_type": "google_size_type",
+            "mm-google-shopping.color": "google_color",
+            "mm-google-shopping.size": "google_size",
+            "mm-google-shopping.material": "google_material",
+            "mm-google-shopping.google_product_category": "google_product_category",
         }
 
         result = {}
