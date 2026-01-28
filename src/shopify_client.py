@@ -96,7 +96,7 @@ class ShopifyClient:
                                         }
                                     }
                                 }
-                                metafields(first: 15) {
+                                metafields(namespace: "mm-google-shopping", first: 20) {
                                     edges {
                                         node {
                                             namespace
