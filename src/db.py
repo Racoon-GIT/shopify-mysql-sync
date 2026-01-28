@@ -56,7 +56,12 @@ class Database:
         MF_Google_Custom_Label_3 VARCHAR(255) DEFAULT NULL,
         MF_Google_Custom_Label_4 VARCHAR(255) DEFAULT NULL,
         MF_Google_Size_System    VARCHAR(100) DEFAULT NULL,
-        MF_Google_Size_Type      VARCHAR(100) DEFAULT NULL
+        MF_Google_Size_Type      VARCHAR(100) DEFAULT NULL,
+        -- Campi Google Merchant Center
+        MF_Google_Color          VARCHAR(255) DEFAULT NULL,
+        MF_Google_Size           VARCHAR(100) DEFAULT NULL,
+        MF_Google_Material       VARCHAR(255) DEFAULT NULL,
+        MF_Google_Product_Category VARCHAR(500) DEFAULT NULL
     )
     """
 
@@ -82,6 +87,11 @@ class Database:
         ("MF_Google_Custom_Label_4", "VARCHAR(255) DEFAULT NULL", "MF_Google_Custom_Label_3"),
         ("MF_Google_Size_System", "VARCHAR(100) DEFAULT NULL", "MF_Google_Custom_Label_4"),
         ("MF_Google_Size_Type", "VARCHAR(100) DEFAULT NULL", "MF_Google_Size_System"),
+        # Campi Google Merchant Center
+        ("MF_Google_Color", "VARCHAR(255) DEFAULT NULL", "MF_Google_Size_Type"),
+        ("MF_Google_Size", "VARCHAR(100) DEFAULT NULL", "MF_Google_Color"),
+        ("MF_Google_Material", "VARCHAR(255) DEFAULT NULL", "MF_Google_Size"),
+        ("MF_Google_Product_Category", "VARCHAR(500) DEFAULT NULL", "MF_Google_Material"),
     ]
 
     # DDL per storico prezzi
@@ -300,6 +310,11 @@ class Database:
         mf_google_custom_label_4: Optional[str] = None,
         mf_google_size_system: Optional[str] = None,
         mf_google_size_type: Optional[str] = None,
+        # Campi Google Merchant Center
+        mf_google_color: Optional[str] = None,
+        mf_google_size: Optional[str] = None,
+        mf_google_material: Optional[str] = None,
+        mf_google_product_category: Optional[str] = None,
     ) -> None:
         """Inserisce o aggiorna prodotto."""
         self.cursor.execute("""
@@ -317,10 +332,12 @@ class Database:
                 MF_Google_Custom_Label_0, MF_Google_Custom_Label_1,
                 MF_Google_Custom_Label_2, MF_Google_Custom_Label_3,
                 MF_Google_Custom_Label_4, MF_Google_Size_System,
-                MF_Google_Size_Type
+                MF_Google_Size_Type, MF_Google_Color,
+                MF_Google_Size, MF_Google_Material,
+                MF_Google_Product_Category
             )
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
                 Variant_Title=VALUES(Variant_Title),
                 SKU=VALUES(SKU),
@@ -353,7 +370,11 @@ class Database:
                 MF_Google_Custom_Label_3=VALUES(MF_Google_Custom_Label_3),
                 MF_Google_Custom_Label_4=VALUES(MF_Google_Custom_Label_4),
                 MF_Google_Size_System=VALUES(MF_Google_Size_System),
-                MF_Google_Size_Type=VALUES(MF_Google_Size_Type)
+                MF_Google_Size_Type=VALUES(MF_Google_Size_Type),
+                MF_Google_Color=VALUES(MF_Google_Color),
+                MF_Google_Size=VALUES(MF_Google_Size),
+                MF_Google_Material=VALUES(MF_Google_Material),
+                MF_Google_Product_Category=VALUES(MF_Google_Product_Category)
         """, (
             variant_id, variant_title, sku, barcode,
             product_id, product_title, product_handle, vendor,
@@ -368,7 +389,9 @@ class Database:
             mf_google_custom_label_0, mf_google_custom_label_1,
             mf_google_custom_label_2, mf_google_custom_label_3,
             mf_google_custom_label_4, mf_google_size_system,
-            mf_google_size_type
+            mf_google_size_type, mf_google_color,
+            mf_google_size, mf_google_material,
+            mf_google_product_category
         ))
 
     def delete_variants(self, variant_ids: Set[int]) -> int:

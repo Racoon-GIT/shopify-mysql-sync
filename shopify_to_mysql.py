@@ -180,6 +180,11 @@ def sync_products_graphql(config: Config, client: ShopifyClient, db: Database) -
                 mf_google_custom_label_4=variant_mf.get("google_custom_label_4"),
                 mf_google_size_system=variant_mf.get("google_size_system"),
                 mf_google_size_type=variant_mf.get("google_size_type"),
+                # Campi Google Merchant Center
+                mf_google_color=variant_mf.get("google_color"),
+                mf_google_size=variant_mf.get("google_size"),
+                mf_google_material=variant_mf.get("google_material"),
+                mf_google_product_category=variant_mf.get("google_product_category"),
             )
 
         # Commit per prodotto
