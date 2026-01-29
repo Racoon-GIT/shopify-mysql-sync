@@ -148,6 +148,7 @@ def sync_products_graphql(config: Config, client: ShopifyClient, db: Database) -
                 product_title=product.get("title", ""),
                 product_handle=product.get("handle", ""),
                 vendor=product.get("vendor", ""),
+                product_type=product.get("productType"),
                 price=price,
                 compare_at_price=compare,
                 inventory_item_id=inventory_item_id,

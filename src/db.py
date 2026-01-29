@@ -28,6 +28,7 @@ class Database:
         Product_title     TEXT,
         Product_handle    VARCHAR(255),
         Vendor            VARCHAR(255),
+        Product_Type      VARCHAR(255) DEFAULT NULL,
         Price             DECIMAL(10,2),
         Compare_AT_Price  DECIMAL(10,2),
         Inventory_Item_ID BIGINT,
@@ -67,6 +68,7 @@ class Database:
 
     # Lista colonne da migrare (nome, tipo, colonna precedente)
     MIGRATION_COLUMNS = [
+        ("Product_Type", "VARCHAR(255) DEFAULT NULL", "Vendor"),
         ("Stock_Magazzino", "INT DEFAULT NULL", "Inventory_Item_ID"),
         ("Body_HTML", "LONGTEXT DEFAULT NULL", "Collections"),
         ("Product_Images", "JSON", "Body_HTML"),
@@ -282,6 +284,7 @@ class Database:
         product_title: str,
         product_handle: str,
         vendor: str,
+        product_type: Optional[str],
         price: Decimal,
         compare_at_price: Decimal,
         inventory_item_id: int,
@@ -321,7 +324,7 @@ class Database:
             INSERT INTO online_products (
                 Variant_id, Variant_Title, SKU, Barcode,
                 Product_id, Product_title, Product_handle, Vendor,
-                Price, Compare_AT_Price, Inventory_Item_ID,
+                Product_Type, Price, Compare_AT_Price, Inventory_Item_ID,
                 Stock_Magazzino, Tags, Collections,
                 Body_HTML, Product_Images,
                 MF_Customization_Description, MF_Shoe_Details,
@@ -336,7 +339,7 @@ class Database:
                 MF_Google_Size, MF_Google_Material,
                 MF_Google_Product_Category
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
                 Variant_Title=VALUES(Variant_Title),
@@ -346,6 +349,7 @@ class Database:
                 Product_title=VALUES(Product_title),
                 Product_handle=VALUES(Product_handle),
                 Vendor=VALUES(Vendor),
+                Product_Type=VALUES(Product_Type),
                 Price=VALUES(Price),
                 Compare_AT_Price=VALUES(Compare_AT_Price),
                 Inventory_Item_ID=VALUES(Inventory_Item_ID),
@@ -378,7 +382,7 @@ class Database:
         """, (
             variant_id, variant_title, sku, barcode,
             product_id, product_title, product_handle, vendor,
-            price, compare_at_price, inventory_item_id,
+            product_type, price, compare_at_price, inventory_item_id,
             stock_magazzino, tags, collections,
             body_html, product_images,
             mf_customization_description, mf_shoe_details,

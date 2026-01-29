@@ -41,6 +41,7 @@ class ShopifyClient:
                     handle
                     vendor
                     tags
+                    productType
                     descriptionHtml
                     status
                     featuredImage {
