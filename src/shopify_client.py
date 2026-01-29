@@ -459,6 +459,7 @@ class ShopifyClient:
             "title": node.get("title", ""),
             "handle": node.get("handle", ""),
             "vendor": node.get("vendor", ""),
+            "productType": node.get("productType", ""),
             "tags": ", ".join(node.get("tags", [])),
             "body_html": node.get("descriptionHtml"),
             "status": node.get("status", "").lower(),
