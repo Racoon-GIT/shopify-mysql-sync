@@ -944,13 +944,11 @@ class ShopifyClient:
         }
 
         for img in images:
-            # Estrai nome file da URL
             src = img.get("src", "")
-            filename = src.split("/")[-1].split("?")[0] if src else ""
 
             image_data["images"].append({
                 "position": img.get("position"),
-                "src": filename,
+                "src": src,
                 "alt": img.get("alt") or "",
                 "width": img.get("width"),
                 "height": img.get("height"),
@@ -959,7 +957,6 @@ class ShopifyClient:
 
         # Featured image
         if product.get("image"):
-            featured_src = product["image"].get("src", "")
-            image_data["featured"] = featured_src.split("/")[-1].split("?")[0] if featured_src else ""
+            image_data["featured"] = product["image"].get("src", "")
 
         return json_module.dumps(image_data, ensure_ascii=False)
