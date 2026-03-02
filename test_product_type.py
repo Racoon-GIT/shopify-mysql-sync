@@ -3,9 +3,6 @@
 
 import requests
 
-SHOP_DOMAIN = "racoon-lab.myshopify.com"
-ACCESS_TOKEN = "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"
-
 QUERY = """
 query GetProduct($id: ID!) {
     product(id: $id) {
