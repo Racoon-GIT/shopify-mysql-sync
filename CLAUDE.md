@@ -6,7 +6,7 @@ Sync giornaliero Shopify → MySQL via GraphQL. Alimenta `online_products` letta
 La tabella `online_products` è letta da 5+ progetti. NON modificare lo schema senza verificare i consumatori a valle (Feed-Exporter, SEO-PILOT, Price_Bulk-UPDT).
 
 ## Trigger
-- Render Web Service `shopify-mysql-sync` (FREE, Frankfurt)
+- Render Web Service `shopify-sync-ws` (FREE, Frankfurt)
 - Triggerato da Scheduler alle 03:00 Roma via `GET /api/trigger`
 - `/api/trigger` ritorna `202` immediato, sync gira in background thread (~60s)
 - `/api/status` per verificare stato ultima esecuzione
