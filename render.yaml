@@ -25,6 +25,8 @@ services:
         sync: false
       - key: DB_NAME
         sync: false
+      - key: TRIGGER_SECRET
+        sync: false
       - key: DEBUG
         value: "true"
       - key: PORT

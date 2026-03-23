@@ -10,3 +10,6 @@ mysql-connector-python>=8.0.0
 # Web server per trigger HTTP da Scheduler
 flask>=3.0.0
 gunicorn>=21.2.0
+
+# Test
+pytest>=7.0.0

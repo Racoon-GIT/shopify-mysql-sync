@@ -21,6 +21,7 @@ Strategia (compatibile con metafield su option):
 
 import sys
 import json
+import traceback
 from typing import Dict, Optional
 
 from src.config import Config, log
@@ -183,7 +184,7 @@ def recreate_variants(
 
 
 def restore_inventory_levels(
-    product_id: str,
+    product_id: int,
     variant_mapping: Dict[int, int],
     db: Database,
     client: ShopifyClient
@@ -262,18 +263,19 @@ def process_product(
     Elabora un singolo prodotto.
 
     Args:
-        product_id: ID prodotto
+        product_id: ID prodotto (stringa, convertito internamente a int)
         client: Client Shopify
         db: Database
 
     Returns:
         bool: True se completato con successo
     """
-    log(f"📦 Elaborazione prodotto: {product_id}")
+    pid = int(product_id)  # Valida e normalizza a int
+    log(f"📦 Elaborazione prodotto: {pid}")
 
     # STEP 1: Fetch varianti
     try:
-        variants = client.get_product_variants(int(product_id))
+        variants = client.get_product_variants(pid)
         log(f"🔍 Trovate {len(variants)} varianti")
     except Exception as e:
         log(f"❌ Errore durante l'accesso alle varianti: {e}")
@@ -284,21 +286,21 @@ def process_product(
         return False
 
     # STEP 2: Backup
-    backup_variants_and_inventory(product_id, variants, client, db)
+    backup_variants_and_inventory(str(pid), variants, client, db)
 
     # STEP 3: Cancella varianti 2-N
     log("🗑️ Cancellazione varianti dalla 2 alla N...")
-    delete_variants(product_id, variants, client, skip_first=True)
+    delete_variants(str(pid), variants, client, skip_first=True)
 
     # STEP 4: Ricrea varianti 2-N
     log("🔄 Ricreazione varianti dalla 2 alla N...")
-    backup_rows = db.get_variant_backups(product_id)
-    variant_mapping = recreate_variants(product_id, backup_rows, client, skip_first=True)
+    backup_rows = db.get_variant_backups(pid)
+    variant_mapping = recreate_variants(str(pid), backup_rows, client, skip_first=True)
 
     # STEP 5: Cancella prima variante
     first_variant = variants[0]
     log(f"🗑️ Cancellazione prima variante: {first_variant['id']} ({first_variant.get('title')})")
-    if client.delete_variant(int(product_id), first_variant["id"]):
+    if client.delete_variant(pid, first_variant["id"]):
         log("  ✅ Prima variante cancellata")
     else:
         log("  ❌ Errore cancellazione prima variante")
@@ -309,17 +311,17 @@ def process_product(
         first_row = backup_rows[0]
         old_variant_id, old_inventory_item_id, variant_json, position = first_row
 
-        new_variant = create_variant_from_backup(product_id, variant_json, client)
+        new_variant = create_variant_from_backup(str(pid), variant_json, client)
         if new_variant and new_variant.get("inventory_item_id"):
             variant_mapping[old_variant_id] = new_variant["inventory_item_id"]
 
     # STEP 7: Ripristina inventory
-    restore_inventory_levels(product_id, variant_mapping, db, client)
+    restore_inventory_levels(pid, variant_mapping, db, client)
 
     # STEP 8: Cleanup location extra
     cleanup_extra_locations(variant_mapping, db, client)
 
-    log(f"✅ Prodotto {product_id} completato con successo!\n")
+    log(f"✅ Prodotto {pid} completato con successo!\n")
     return True
 
 
@@ -348,7 +350,6 @@ def main() -> None:
 
     except Exception as e:
         log(f"❌ Errore fatale: {e}")
-        import traceback
         traceback.print_exc()
         sys.exit(1)
 

@@ -9,7 +9,7 @@ Funzionalità:
 - Sincronizza varianti su tabella MySQL online_products
 - Traccia storico variazioni prezzi su price_history
 - Rimuove varianti non più presenti su Shopify
-- Sincronizza metafield prodotto e variante
+- Sincronizza metafield prodotto (inclusi Google Shopping)
 - Sincronizza immagini prodotto (JSON)
 - Sincronizza body HTML
 
@@ -22,7 +22,7 @@ import sys
 from decimal import Decimal
 from typing import Dict, Any, Optional
 
-from src.config import Config, log
+from src.config import Config, VALID_TAGS, log
 from src.shopify_client import ShopifyClient
 from src.db import Database
 
@@ -97,7 +97,7 @@ def sync_products_graphql(config: Config, client: ShopifyClient, db: Database) -
     # La location "Magazzino" è gestita direttamente nella query GraphQL
     for product in client.get_products_graphql(status="active", location_name="Magazzino"):
         # Filtro per tag
-        if not is_shoe(product, config.VALID_TAGS):
+        if not is_shoe(product, VALID_TAGS):
             continue
 
         product_id = product["id"]

@@ -97,15 +97,6 @@ class ShopifyClient:
                                         }
                                     }
                                 }
-                                metafields(namespace: "mm-google-shopping", first: 20) {
-                                    edges {
-                                        node {
-                                            namespace
-                                            key
-                                            value
-                                        }
-                                    }
-                                }
                             }
                         }
                     }
@@ -297,13 +288,17 @@ class ShopifyClient:
                 if "errors" in result:
                     errors = result["errors"]
                     # Controlla se è throttled
+                    throttled = False
                     for err in errors:
                         if "THROTTLED" in str(err.get("extensions", {})):
                             cost = err.get("extensions", {}).get("cost", {})
                             wait_time = cost.get("requestedQueryCost", 10) / 50  # ~50 points/sec
                             log(f"⏳ GraphQL throttled, attendo {wait_time:.1f}s...")
                             time.sleep(max(wait_time, 2))
-                            continue
+                            throttled = True
+                            break
+                    if throttled:
+                        continue  # Retry outer loop
                     # Altri errori
                     error_msgs = [e.get("message", str(e)) for e in errors]
                     raise Exception(f"GraphQL errors: {'; '.join(error_msgs)}")
@@ -435,13 +430,6 @@ class ShopifyClient:
                                 break
                         break
 
-            # Metafield variante
-            variant_metafields = {}
-            for mf_edge in var.get("metafields", {}).get("edges", []):
-                mf = mf_edge["node"]
-                key = f"{mf['namespace']}.{mf['key']}"
-                variant_metafields[key] = mf.get("value")
-
             variants.append({
                 "id": variant_id,
                 "title": var.get("title", ""),
@@ -450,8 +438,7 @@ class ShopifyClient:
                 "price": var.get("price", "0"),
                 "compare_at_price": var.get("compareAtPrice") or "0",
                 "inventory_item_id": inventory_item_id,
-                "stock_for_location": stock_for_location,
-                "metafields": variant_metafields
+                "stock_for_location": stock_for_location
             })
 
         return {
@@ -490,28 +477,6 @@ class ShopifyClient:
         return None
 
     # --- Metodi specifici Shopify ---
-
-    def get_products(self, status: str = "active", limit: int = 250):
-        """
-        Generatore che itera su tutti i prodotti con paginazione.
-
-        Args:
-            status: Stato prodotti (active, draft, archived)
-            limit: Prodotti per pagina (max 250)
-
-        Yields:
-            dict: Singolo prodotto
-        """
-        url = self.config.api_url(f"products.json?status={status}&limit={limit}")
-
-        while url:
-            response = self.get("", full_url=url)
-            products = response.json().get("products", [])
-
-            for product in products:
-                yield product
-
-            url = self.extract_next_link(response.headers.get("Link"))
 
     def get_product_variants(self, product_id: int) -> List[Dict[str, Any]]:
         """
@@ -675,164 +640,6 @@ class ShopifyClient:
         log(f"✅ Mappa collezioni creata con {len(product_to_collections)} prodotti.")
         return dict(product_to_collections)
 
-    def get_locations(self) -> List[Dict[str, Any]]:
-        """
-        Recupera tutte le locations dello store.
-
-        Returns:
-            List[Dict]: Lista locations
-        """
-        try:
-            response = self.get("locations.json")
-            return response.json().get("locations", [])
-        except Exception as e:
-            log(f"⚠️ Errore recupero locations: {e}")
-            return []
-
-    def get_location_id_by_name(self, name: str) -> Optional[int]:
-        """
-        Trova l'ID di una location dato il nome.
-
-        Args:
-            name: Nome della location (case-insensitive)
-
-        Returns:
-            Optional[int]: ID location o None se non trovata
-        """
-        locations = self.get_locations()
-        name_lower = name.lower()
-
-        for loc in locations:
-            if loc.get("name", "").lower() == name_lower:
-                return loc["id"]
-
-        log(f"⚠️ Location '{name}' non trovata")
-        return None
-
-    def get_inventory_level_for_location(
-        self,
-        inventory_item_id: int,
-        location_id: int
-    ) -> Optional[int]:
-        """
-        Recupera la quantità disponibile per una specifica location.
-
-        Args:
-            inventory_item_id: ID inventory item
-            location_id: ID location
-
-        Returns:
-            Optional[int]: Quantità disponibile o None se non trovata
-        """
-        levels = self.get_inventory_levels(inventory_item_id)
-
-        for level in levels:
-            if level.get("location_id") == location_id:
-                return level.get("available")
-
-        return None
-
-    def build_inventory_map_for_location(
-        self,
-        inventory_item_ids: List[int],
-        location_id: int
-    ) -> Dict[int, Optional[int]]:
-        """
-        Costruisce mappa inventory_item_id -> quantità per una location.
-        Usa batch API per efficienza.
-
-        Args:
-            inventory_item_ids: Lista di inventory item IDs
-            location_id: ID location
-
-        Returns:
-            Dict[int, Optional[int]]: {inventory_item_id: available}
-        """
-        result: Dict[int, Optional[int]] = {}
-
-        # Shopify permette max 50 inventory_item_ids per chiamata
-        batch_size = 50
-
-        for i in range(0, len(inventory_item_ids), batch_size):
-            batch = inventory_item_ids[i:i + batch_size]
-            ids_param = ",".join(str(id_) for id_ in batch)
-
-            try:
-                response = self.get(
-                    "inventory_levels.json",
-                    params={
-                        "inventory_item_ids": ids_param,
-                        "location_ids": location_id
-                    }
-                )
-                levels = response.json().get("inventory_levels", [])
-
-                # Mappa risultati
-                for level in levels:
-                    result[level["inventory_item_id"]] = level.get("available")
-
-                # Segna come None quelli non trovati
-                for item_id in batch:
-                    if item_id not in result:
-                        result[item_id] = None
-
-            except Exception as e:
-                log(f"⚠️ Errore recupero batch inventory: {e}")
-                for item_id in batch:
-                    result[item_id] = None
-
-        return result
-
-    # --- Metodi per Metafield ---
-
-    def get_product_metafields(self, product_id: int) -> Dict[str, Any]:
-        """
-        Recupera tutti i metafield di un prodotto.
-
-        Args:
-            product_id: ID prodotto
-
-        Returns:
-            Dict[str, Any]: {namespace.key: value}
-        """
-        result = {}
-        try:
-            response = self.get(f"products/{product_id}/metafields.json")
-            metafields = response.json().get("metafields", [])
-
-            for mf in metafields:
-                key = f"{mf['namespace']}.{mf['key']}"
-                result[key] = mf.get("value")
-
-        except Exception as e:
-            log(f"⚠️ Errore recupero metafield prodotto {product_id}: {e}")
-
-        return result
-
-    def get_variant_metafields(self, variant_id: int) -> Dict[str, Any]:
-        """
-        Recupera tutti i metafield di una variante.
-
-        Args:
-            variant_id: ID variante
-
-        Returns:
-            Dict[str, Any]: {namespace.key: value}
-        """
-        result = {}
-        try:
-            response = self.get(f"variants/{variant_id}/metafields.json")
-            metafields = response.json().get("metafields", [])
-
-            for mf in metafields:
-                key = f"{mf['namespace']}.{mf['key']}"
-                result[key] = mf.get("value")
-
-        except Exception as e:
-            log(f"⚠️ Errore recupero metafield variante {variant_id}: {e}")
-
-        return result
-
     @staticmethod
     def extract_product_metafields(metafields: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -883,45 +690,6 @@ class ShopifyClient:
                 # Converti boolean per google_custom_product
                 elif db_key == "google_custom_product":
                     value = str(value).lower() in ("true", "1", "yes")
-                result[db_key] = value
-
-        return result
-
-    @staticmethod
-    def extract_variant_metafields(metafields: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Estrae i metafield variante Google Shopping in un dizionario normalizzato.
-
-        Args:
-            metafields: Dizionario {namespace.key: value}
-
-        Returns:
-            Dict con chiavi normalizzate per DB
-        """
-        # Mapping namespace.key -> nome campo DB
-        mapping = {
-            "mm-google-shopping.age_group": "google_age_group",
-            "mm-google-shopping.condition": "google_condition",
-            "mm-google-shopping.gender": "google_gender",
-            "mm-google-shopping.mpn": "google_mpn",
-            "mm-google-shopping.custom_label_0": "google_custom_label_0",
-            "mm-google-shopping.custom_label_1": "google_custom_label_1",
-            "mm-google-shopping.custom_label_2": "google_custom_label_2",
-            "mm-google-shopping.custom_label_3": "google_custom_label_3",
-            "mm-google-shopping.custom_label_4": "google_custom_label_4",
-            "mm-google-shopping.size_system": "google_size_system",
-            "mm-google-shopping.size_type": "google_size_type",
-            # Campi Google Merchant Center
-            "mm-google-shopping.color": "google_color",
-            "mm-google-shopping.size": "google_size",
-            "mm-google-shopping.material": "google_material",
-            "mm-google-shopping.google_product_category": "google_product_category",
-        }
-
-        result = {}
-        for mf_key, db_key in mapping.items():
-            value = metafields.get(mf_key)
-            if value is not None:
                 result[db_key] = value
 
         return result

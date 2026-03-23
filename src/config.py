@@ -16,6 +16,15 @@ def log(msg: str) -> None:
     print(f"[{ts}] {msg}", flush=True)
 
 
+# Tag validi per filtro prodotti (usato in sync)
+VALID_TAGS = frozenset({
+    "sneakers personalizzate",
+    "scarpe personalizzate",
+    "ciabatte personalizzate",
+    "stivali personalizzati",
+})
+
+
 @dataclass
 class Config:
     """Configurazione centralizzata dell'applicazione."""
@@ -34,14 +43,6 @@ class Config:
     # Opzionali
     product_ids: Optional[List[str]] = None
     debug: bool = True
-
-    # Tag validi per filtro prodotti (usato in sync)
-    VALID_TAGS = {
-        "sneakers personalizzate",
-        "scarpe personalizzate",
-        "ciabatte personalizzate",
-        "stivali personalizzati"
-    }
 
     @classmethod
     def from_env(cls, require_product_ids: bool = False) -> 'Config':

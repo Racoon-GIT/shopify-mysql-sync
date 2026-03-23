@@ -3,13 +3,17 @@ Web wrapper per shopify-mysql-sync.
 Espone endpoint HTTP per trigger da Scheduler e health check.
 """
 
+import os
 import threading
 import time
-from flask import Flask, jsonify, redirect
+from flask import Flask, jsonify, request
 
 app = Flask(__name__)
 
-# Stato sync in-memory
+TRIGGER_SECRET = os.getenv("TRIGGER_SECRET")
+
+# Stato sync in-memory (protetto da lock)
+_sync_lock = threading.Lock()
 sync_status = {
     "running": False,
     "last_run": None,
@@ -24,21 +28,25 @@ def run_sync():
     from shopify_to_mysql import main as sync_main
     from src.config import log
 
-    sync_status["running"] = True
-    sync_status["last_error"] = None
+    with _sync_lock:
+        sync_status["running"] = True
+        sync_status["last_error"] = None
     start = time.time()
 
     try:
         log("🔄 Sync triggerato via HTTP")
         sync_main()
-        sync_status["last_status"] = "success"
+        with _sync_lock:
+            sync_status["last_status"] = "success"
     except Exception as exc:
-        sync_status["last_status"] = "failed"
-        sync_status["last_error"] = str(exc)
+        with _sync_lock:
+            sync_status["last_status"] = "failed"
+            sync_status["last_error"] = str(exc)
     finally:
-        sync_status["running"] = False
-        sync_status["last_duration"] = round(time.time() - start, 1)
-        sync_status["last_run"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        with _sync_lock:
+            sync_status["running"] = False
+            sync_status["last_duration"] = round(time.time() - start, 1)
+            sync_status["last_run"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 @app.route("/health")
@@ -48,6 +56,11 @@ def health():
 
 @app.route("/api/trigger", methods=["GET", "POST"])
 def trigger():
+    if TRIGGER_SECRET:
+        token = request.args.get("secret") or request.headers.get("X-Trigger-Secret")
+        if token != TRIGGER_SECRET:
+            return jsonify({"error": "unauthorized"}), 401
+
     if sync_status["running"]:
         return jsonify({"status": "already_running"}), 409
 

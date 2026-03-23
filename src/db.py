@@ -5,8 +5,6 @@ Gestione database MySQL centralizzata.
 
 from typing import Optional, List, Tuple, Any, Set
 from decimal import Decimal
-from contextlib import contextmanager
-
 import mysql.connector
 from mysql.connector import MySQLConnection
 from mysql.connector.cursor import MySQLCursor
@@ -46,7 +44,7 @@ class Database:
         MF_O_Description             TEXT DEFAULT NULL,
         MF_Handling                  INT DEFAULT NULL,
         MF_Google_Custom_Product     BOOLEAN DEFAULT NULL,
-        -- Metafield Variante (Google Shopping)
+        -- Metafield Google Shopping (a livello prodotto, applicati a tutte le varianti)
         MF_Google_Age_Group      VARCHAR(100) DEFAULT NULL,
         MF_Google_Condition      VARCHAR(100) DEFAULT NULL,
         MF_Google_Gender         VARCHAR(100) DEFAULT NULL,
@@ -301,7 +299,7 @@ class Database:
         mf_o_description: Optional[str] = None,
         mf_handling: Optional[int] = None,
         mf_google_custom_product: Optional[bool] = None,
-        # Metafield Variante (Google Shopping)
+        # Metafield Google Shopping (da prodotto)
         mf_google_age_group: Optional[str] = None,
         mf_google_condition: Optional[str] = None,
         mf_google_gender: Optional[str] = None,
