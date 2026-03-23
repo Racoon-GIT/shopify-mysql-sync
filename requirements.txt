@@ -6,3 +6,7 @@ requests>=2.28.0
 
 # Connector MySQL
 mysql-connector-python>=8.0.0
+
+# Web server per trigger HTTP da Scheduler
+flask>=3.0.0
+gunicorn>=21.2.0

@@ -2,15 +2,14 @@
 # Configurazione servizi Render.com per shopify-mysql-sync
 
 services:
-  # Cron job giornaliero per sincronizzazione prodotti Shopify -> MySQL
-  - type: cron
-    name: shopify-sync
+  # Web service triggerabile da Scheduler
+  - type: web
+    name: shopify-mysql-sync
     runtime: python
     region: frankfurt
     plan: free
-    schedule: "0 3 * * *"  # Ogni giorno alle 03:00 UTC
     buildCommand: "pip install -r requirements.txt"
-    startCommand: "python shopify_to_mysql.py"
+    startCommand: "gunicorn app:app --bind 0.0.0.0:10000 --timeout 120 --workers 1"
     envVars:
       - key: SHOPIFY_DOMAIN
         sync: false
@@ -28,6 +27,8 @@ services:
         sync: false
       - key: DEBUG
         value: "true"
+      - key: PORT
+        value: "10000"
 
   # Cron job manuale per reset varianti (eseguire solo quando necessario)
   - type: cron
