@@ -280,7 +280,7 @@ class ShopifyClient:
                     # Controlla se è throttled
                     throttled = False
                     for err in errors:
-                        if "THROTTLED" in str(err.get("extensions", {})):
+                        if err.get("extensions", {}).get("code") == "THROTTLED":
                             cost = err.get("extensions", {}).get("cost", {})
                             wait_time = cost.get("requestedQueryCost", 10) / 50  # ~50 points/sec
                             log(f"⏳ GraphQL throttled, attendo {wait_time:.1f}s...")
@@ -436,7 +436,7 @@ class ShopifyClient:
             "title": node.get("title", ""),
             "handle": node.get("handle", ""),
             "vendor": node.get("vendor", ""),
-            "productType": node.get("productType", ""),
+            "product_type": node.get("productType", ""),
             "tags": ", ".join(node.get("tags", [])),
             "body_html": node.get("descriptionHtml"),
             "status": node.get("status", "").lower(),

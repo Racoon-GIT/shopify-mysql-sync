@@ -11,5 +11,5 @@ mysql-connector-python>=8.0.0
 flask>=3.0.0
 gunicorn>=21.2.0
 
-# Test
-pytest>=7.0.0
+# Test (dev only — NON incluso in prod, installare con: pip install -r requirements-dev.txt)
+# pytest>=7.0.0  → spostato in requirements-dev.txt

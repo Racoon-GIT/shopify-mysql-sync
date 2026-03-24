@@ -1,0 +1,7 @@
+# requirements-dev.txt
+# Dipendenze solo per sviluppo/test (NON installate in produzione su Render)
+
+-r requirements.txt
+
+# Test
+pytest>=7.0.0

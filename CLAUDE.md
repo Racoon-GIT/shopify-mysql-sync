@@ -14,7 +14,7 @@ La tabella `online_products` è letta da 5+ progetti. NON modificare lo schema s
 
 ## Shopify API
 - GraphQL: ~75 chiamate (vs ~9000 con REST) — 10 prodotti/pagina, limite 1000 punti/query
-- Sleep 0.5s tra chiamate REST mutanti (POST/PUT/DELETE), exponential backoff su 429/502-504
+- Sleep 0.5s tra chiamate REST mutanti (POST/DELETE), exponential backoff su 429/502-504
 - Filtra solo prodotti con tag: `sneakers personalizzate`, `scarpe personalizzate`, `ciabatte personalizzate`, `stivali personalizzati`
 
 ## reset_variants

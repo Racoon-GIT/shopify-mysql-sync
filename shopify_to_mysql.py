@@ -44,7 +44,8 @@ def sanitize_html(html: Optional[str]) -> Optional[str]:
     html = html.replace('\ufeff', '')
 
     # Rimuove anche la versione byte del BOM se presente come stringa
-    html = html.lstrip('\xef\xbb\xbf')
+    if html.startswith('\xef\xbb\xbf'):
+        html = html[3:]
 
     return html
 
@@ -148,7 +149,7 @@ def sync_products_graphql(config: Config, client: ShopifyClient, db: Database) -
                 product_title=product.get("title", ""),
                 product_handle=product.get("handle", ""),
                 vendor=product.get("vendor", ""),
-                product_type=product.get("productType"),
+                product_type=product.get("product_type"),
                 price=price,
                 compare_at_price=compare,
                 inventory_item_id=inventory_item_id,
