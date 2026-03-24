@@ -23,6 +23,13 @@ La tabella `online_products` è letta da 5+ progetti. NON modificare lo schema s
 - Richiede `PRODUCT_IDS` env var (comma-separated) impostata PRIMA del trigger
 - Documentazione dettagliata in `ANALISI_FUNZIONALE_reset_variants.md`
 
+## Test (OBBLIGATORIO prima di ogni push)
+- Framework: `pytest` (installato a livello di sistema con `pip3 install pytest flask requests mysql-connector-python`)
+- Eseguire `/usr/bin/python3 -m pytest` dalla root del repo PRIMA di ogni `git push`
+- Se i test falliscono, fixare prima del push. Non pushare codice con test rotti.
+- File test: `test_sync.py` (business logic), `test_app.py` (endpoint Flask)
+- I test NON richiedono Shopify/MySQL — mockano tutte le dipendenze esterne
+
 ## Env vars
 ```
 SHOPIFY_DOMAIN, SHOPIFY_TOKEN, SHOPIFY_API_VERSION  # Shopify Admin API
