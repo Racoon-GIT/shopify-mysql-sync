@@ -224,16 +224,6 @@ class ShopifyClient:
         time.sleep(self.DEFAULT_SLEEP)
         return response
 
-    def put(
-        self,
-        endpoint: str,
-        payload: Dict[str, Any]
-    ) -> requests.Response:
-        """PUT request."""
-        response = self._request("PUT", endpoint, payload=payload)
-        time.sleep(self.DEFAULT_SLEEP)
-        return response
-
     def delete(self, endpoint: str) -> requests.Response:
         """DELETE request."""
         response = self._request("DELETE", endpoint)

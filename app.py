@@ -29,7 +29,6 @@ def run_sync():
     from src.config import log
 
     with _sync_lock:
-        sync_status["running"] = True
         sync_status["last_error"] = None
     start = time.time()
 
@@ -61,8 +60,10 @@ def trigger():
         if token != TRIGGER_SECRET:
             return jsonify({"error": "unauthorized"}), 401
 
-    if sync_status["running"]:
-        return jsonify({"status": "already_running"}), 409
+    with _sync_lock:
+        if sync_status["running"]:
+            return jsonify({"status": "already_running"}), 409
+        sync_status["running"] = True
 
     thread = threading.Thread(target=run_sync, daemon=True)
     thread.start()

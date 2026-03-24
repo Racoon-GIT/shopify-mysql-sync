@@ -41,11 +41,13 @@ class TestHealth:
 
 
 class TestTriggerNoAuth:
-    @patch("app.run_sync")
-    def test_trigger_starts_sync(self, mock_sync, client_no_auth):
+    @patch("app.threading.Thread")
+    def test_trigger_starts_sync(self, mock_thread, client_no_auth):
         response = client_no_auth.get("/api/trigger")
         assert response.status_code == 202
         assert response.json["status"] == "started"
+        mock_thread.assert_called_once()
+        mock_thread.return_value.start.assert_called_once()
 
 
 class TestTriggerWithAuth:

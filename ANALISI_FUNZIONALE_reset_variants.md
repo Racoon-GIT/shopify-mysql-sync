@@ -85,10 +85,10 @@ mysql-connector-python   # Connessione database MySQL
 ```yaml
 services:
   - type: cron
-    name: shopify-sync
-    schedule: "@daily"
-    env: python
-    buildCommand: ""
+    name: reset-variants
+    schedule: "0 0 31 2 *"  # Mai - solo trigger manuale
+    runtime: python
+    buildCommand: "pip install -r requirements.txt"
     startCommand: "python reset_variants.py"
 ```
 
