@@ -1,39 +1,48 @@
-# CLAUDE.md — shopify-mysql-sync
+# shopify-mysql-sync
 
-Sync giornaliero Shopify → MySQL via GraphQL. Alimenta `online_products` letta da Feed-Exporter, SEO-PILOT e altri.
+Daily **Shopify → MySQL** sync via GraphQL. Feeds the `online_products` table read by Feed-Exporter, SEO-PILOT, Price_Bulk-UPDT, and others.
 
-## Shared Database (CRITICO)
-La tabella `online_products` è letta da 5+ progetti. NON modificare lo schema senza verificare i consumatori a valle (Feed-Exporter, SEO-PILOT, Price_Bulk-UPDT).
+## Stack
+- Python + Flask + Shopify GraphQL → Render FREE web service `shopify-sync-ws`.
+- DB: shared MySQL `racoon`.
 
-## Trigger
-- Render Web Service `shopify-sync-ws` (FREE, Frankfurt)
-- Triggerato da Scheduler alle 03:00 Roma via `GET /api/trigger`
-- `/api/trigger` ritorna `202` immediato, sync gira in background thread (~60s)
-- `/api/status` per verificare stato ultima esecuzione
-- KeepAlive dallo Scheduler `*/5 2-3 * * *` per svegliare il servizio prima del sync
+## Trigger architecture
 
-## Shopify API
-- GraphQL: ~75 chiamate (vs ~9000 con REST) — 10 prodotti/pagina, limite 1000 punti/query
-- Sleep 0.5s tra chiamate REST mutanti (POST/DELETE), exponential backoff su 429/502-504
-- Filtra solo prodotti con tag: `sneakers personalizzate`, `scarpe personalizzate`, `ciabatte personalizzate`, `stivali personalizzati`
+- Render Web Service `shopify-sync-ws` (FREE, Frankfurt).
+- Triggered by Scheduler at **03:00 Rome** via `GET /api/trigger`.
+- `/api/trigger` returns **immediate `202`**, sync runs in a background thread (~60s).
+- `/api/status` to check last execution status.
+- KeepAlive from Scheduler `*/5 2-3 * * *` to wake the service before the sync.
 
-## reset_variants
-- Script separato per ricreazione varianti con backup/restore inventory
-- Cron Render `reset-variants` con schedule impossibile (`0 0 31 2 *`) — solo trigger manuale dalla dashboard Render
-- Richiede `PRODUCT_IDS` env var (comma-separated) impostata PRIMA del trigger
-- Documentazione dettagliata in `ANALISI_FUNZIONALE_reset_variants.md`
+## Always-on rules
 
-## Test (OBBLIGATORIO prima di ogni push)
-- Framework: `pytest` (installato a livello di sistema con `pip3 install pytest flask requests mysql-connector-python`)
-- Eseguire `/usr/bin/python3 -m pytest` dalla root del repo PRIMA di ogni `git push`
-- Se i test falliscono, fixare prima del push. Non pushare codice con test rotti.
-- File test: `test_sync.py` (business logic), `test_app.py` (endpoint Flask)
-- I test NON richiedono Shopify/MySQL — mockano tutte le dipendenze esterne
+1. **`online_products` is read by 5+ projects**: do NOT change the schema without checking consumers (Feed-Exporter, SEO-PILOT, Price_Bulk-UPDT, etc.). See `../docs/shared-database.md`.
+2. **Mandatory tag filter**: the sync only includes products with tags `sneakers personalizzate`, `scarpe personalizzate`, `ciabatte personalizzate`, `stivali personalizzati`. Changing the list impacts all consumers.
+3. **Sleep 0.5s between mutating REST calls** (POST/DELETE), exponential backoff on 429/502-504.
+4. **GraphQL preferred**: ~75 calls vs ~9000 with REST. 10 products/page, 1000 points/query limit.
+5. **Coverage test** (`/usr/bin/python3 -m pytest`): mock Shopify/MySQL (no external deps). Files: `test_sync.py`, `test_app.py`.
+6. **Keepalive must precede the trigger**: same pattern as Feed-Exporter. Reversed = cold-start fail.
 
 ## Env vars
+
 ```
-SHOPIFY_DOMAIN, SHOPIFY_TOKEN, SHOPIFY_API_VERSION  # Shopify Admin API
-DB_HOST, DB_USER, DB_PASS, DB_NAME                   # MySQL condiviso `racoon` (DB_PASS, NON DB_PASSWORD)
-TRIGGER_SECRET                                        # Auth per /api/trigger (opzionale ma raccomandato)
-PRODUCT_IDS                                           # Solo per reset_variants (comma-separated)
+SHOPIFY_DOMAIN, SHOPIFY_TOKEN, SHOPIFY_API_VERSION    # Shopify Admin API
+DB_HOST, DB_USER, DB_PASS, DB_NAME                     # MySQL `racoon` (NB: DB_PASS, NOT DB_PASSWORD)
+TRIGGER_SECRET                                          # Auth for /api/trigger (optional but recommended)
+PRODUCT_IDS                                             # Only for reset_variants (comma-separated)
 ```
+
+## `reset_variants` (separate script)
+
+- Variant recreation with inventory backup/restore.
+- Render cron `reset-variants` with **impossible** schedule (`0 0 31 2 *`) — manual trigger only from Render dashboard.
+- Requires `PRODUCT_IDS` env var (comma-separated) set **before** trigger.
+- Detailed docs in `ANALISI_FUNZIONALE_reset_variants.md`.
+
+## Lazy docs — read ONLY if the task matches
+
+| Current task trigger | File to read |
+|---|---|
+| **Schema change on `online_products`** or finding writer/reader of a `racoon` table | `../docs/shared-database.md` |
+| **Modifying keepalive/trigger time** or understanding the downstream cron pipeline (Feed-Exporter depends on you) | `../docs/dependencies-graph.md` |
+| **Rotating Shopify token** | `../docs/shared-secrets.md` |
