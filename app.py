@@ -3,6 +3,7 @@ Web wrapper per shopify-mysql-sync.
 Espone endpoint HTTP per trigger da Scheduler e health check.
 """
 
+import hmac
 import os
 import threading
 import time
@@ -48,6 +49,38 @@ def run_sync():
             sync_status["last_run"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def _bearer_token(auth_header):
+    """Estrae il token da 'Authorization: Bearer <token>'. Schema case-insensitive."""
+    if not auth_header:
+        return None
+    parts = auth_header.split(None, 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    return parts[1].strip() or None
+
+
+def _is_authorized():
+    """True se uno qualsiasi dei trasporti presenta il TRIGGER_SECRET corretto.
+
+    `Authorization: Bearer` e' il trasporto target (Scheduler). `X-Trigger-Secret`
+    e `?secret=` restano per compatibilita' finche' SERVER non aggiorna il record
+    del job (handoff 2026-08-01): togliere la query string prima romperebbe in
+    silenzio il sync delle 03:00 Rome.
+    """
+    if not TRIGGER_SECRET:
+        return True
+    expected = TRIGGER_SECRET.encode("utf-8")
+    candidates = (
+        _bearer_token(request.headers.get("Authorization")),
+        request.headers.get("X-Trigger-Secret"),
+        request.args.get("secret"),
+    )
+    return any(
+        c is not None and hmac.compare_digest(c.encode("utf-8"), expected)
+        for c in candidates
+    )
+
+
 @app.route("/health")
 def health():
     return "OK", 200
@@ -55,10 +88,8 @@ def health():
 
 @app.route("/api/trigger", methods=["GET", "POST"])
 def trigger():
-    if TRIGGER_SECRET:
-        token = request.args.get("secret") or request.headers.get("X-Trigger-Secret")
-        if token != TRIGGER_SECRET:
-            return jsonify({"error": "unauthorized"}), 401
+    if not _is_authorized():
+        return jsonify({"error": "unauthorized"}), 401, {"WWW-Authenticate": "Bearer"}
 
     with _sync_lock:
         if sync_status["running"]:

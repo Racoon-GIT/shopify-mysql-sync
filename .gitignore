@@ -12,4 +12,4 @@ build/
 !.env.example
 .DS_Store
 .pytest_cache/
-.claude/
+.claude/settings.local.json

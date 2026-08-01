@@ -49,6 +49,15 @@ class TestTriggerNoAuth:
         mock_thread.assert_called_once()
         mock_thread.return_value.start.assert_called_once()
 
+    @patch("app.threading.Thread")
+    def test_trigger_with_any_bearer_still_202_without_secret(self, mock_thread, client_no_auth):
+        """Senza TRIGGER_SECRET in env, un bearer qualunque (anche sbagliato) non blocca."""
+        response = client_no_auth.get(
+            "/api/trigger",
+            headers={"Authorization": "Bearer whatever-wrong-token"}
+        )
+        assert response.status_code == 202
+
 
 class TestTriggerWithAuth:
     def test_trigger_without_secret_returns_401(self, client_with_auth):
@@ -71,6 +80,61 @@ class TestTriggerWithAuth:
             headers={"X-Trigger-Secret": "test-secret-123"}
         )
         assert response.status_code == 202
+
+    @patch("app.run_sync")
+    def test_trigger_with_correct_bearer(self, mock_sync, client_with_auth):
+        response = client_with_auth.get(
+            "/api/trigger",
+            headers={"Authorization": "Bearer test-secret-123"}
+        )
+        assert response.status_code == 202
+
+    @patch("app.run_sync")
+    def test_trigger_with_lowercase_bearer_scheme(self, mock_sync, client_with_auth):
+        response = client_with_auth.get(
+            "/api/trigger",
+            headers={"Authorization": "bearer test-secret-123"}
+        )
+        assert response.status_code == 202
+
+    def test_trigger_with_wrong_bearer_returns_401(self, client_with_auth):
+        response = client_with_auth.get(
+            "/api/trigger",
+            headers={"Authorization": "Bearer wrong"}
+        )
+        assert response.status_code == 401
+
+    def test_trigger_with_wrong_scheme_returns_401(self, client_with_auth):
+        response = client_with_auth.get(
+            "/api/trigger",
+            headers={"Authorization": "Basic test-secret-123"}
+        )
+        assert response.status_code == 401
+
+    def test_trigger_with_bearer_no_token_returns_401(self, client_with_auth):
+        response = client_with_auth.get(
+            "/api/trigger",
+            headers={"Authorization": "Bearer"}
+        )
+        assert response.status_code == 401
+
+    def test_trigger_with_bearer_blank_token_returns_401(self, client_with_auth):
+        response = client_with_auth.get(
+            "/api/trigger",
+            headers={"Authorization": "Bearer   "}
+        )
+        assert response.status_code == 401
+
+    @patch("app.run_sync")
+    def test_trigger_with_correct_query_param_no_auth_header(self, mock_sync, client_with_auth):
+        """Regressione: il vecchio contratto ?secret= senza Authorization deve restare valido."""
+        response = client_with_auth.get("/api/trigger?secret=test-secret-123")
+        assert response.status_code == 202
+
+    def test_401_exposes_www_authenticate_bearer_header(self, client_with_auth):
+        response = client_with_auth.get("/api/trigger")
+        assert response.status_code == 401
+        assert response.headers.get("WWW-Authenticate") == "Bearer"
 
 
 class TestStatus:

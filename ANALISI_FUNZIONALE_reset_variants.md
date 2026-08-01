@@ -1,51 +1,51 @@
-# Analisi Funzionale: Script Reset Varianti Shopify
+# Functional Analysis: Shopify Variant Reset Script
 
-**Versione**: 3.0  
-**Data**: 25 Novembre 2025  
-**Autore**: Racoon s.r.l.  
-**Sistema**: Shopify Variant Reset & Inventory Management
+**Version**: 3.0  
+**Date**: 25 November 2025  
+**Author**: Racoon s.r.l.  
+**System**: Shopify Variant Reset & Inventory Management
 
 ---
 
-## 1. PANORAMICA
+## 1. OVERVIEW
 
-### 1.1 Scopo del Sistema
-Script Python per la cancellazione e ricreazione completa delle varianti di prodotti Shopify, preservando tutti i dati originali inclusi gli inventory levels multi-location.
+### 1.1 Purpose
+Python script for full deletion and recreation of Shopify product variants, preserving all original data including multi-location inventory levels.
 
-### 1.2 Contesto Operativo
-Lo script è utilizzato per:
-- Riordinamento varianti quando l'API Shopify non permette modifiche in-place
-- Fix di corruzioni dati nelle varianti
-- Workaround per limitazioni API su prodotti con metafield collegati alle option
-- Pulizia e normalizzazione struttura varianti
+### 1.2 Operational Context
+Used for:
+- Variant reordering when Shopify API does not allow in-place edits
+- Fixing data corruption in variants
+- Workaround for API limitations on products with metafields linked to options
+- Cleanup and normalization of variant structure
 
-### 1.3 Ambiente di Esecuzione
-- **Piattaforma**: Render.com (servizio cron)
-- **Linguaggio**: Python 3.x
-- **Database**: MySQL per backup temporaneo
+### 1.3 Runtime Environment
+- **Platform**: Render.com (cron service)
+- **Language**: Python 3.x
+- **Database**: MySQL for temporary backup
 - **API**: Shopify Admin REST API v2024-04
 
 ---
 
-## 2. ARCHITETTURA SISTEMA
+## 2. SYSTEM ARCHITECTURE
 
-### 2.1 Stack Tecnologico
+### 2.1 Tech Stack
 
 ```
 ┌─────────────────────────────────────────┐
 │         Render Cron Service             │
-│  (Esecuzione schedulata o manuale)      │
+│   (Scheduled or manual execution)       │
 └──────────────┬──────────────────────────┘
                │
                ▼
 ┌─────────────────────────────────────────┐
 │      reset_variants.py (Python)         │
 │  ┌────────────────────────────────┐     │
-│  │  • Fetch varianti da Shopify   │     │
-│  │  • Backup DB (MySQL temporaneo)│     │
-│  │  • Delete & Recreate varianti  │     │
+│  │  • Fetch variants from Shopify │     │
+│  │  • Backup DB (MySQL temporary) │     │
+│  │  • Delete & Recreate variants  │     │
 │  │  • Restore inventory levels    │     │
-│  │  • Cleanup location non usate  │     │
+│  │  • Cleanup unused locations    │     │
 │  └────────────────────────────────┘     │
 └──────┬────────────────────┬─────────────┘
        │                    │
@@ -57,36 +57,36 @@ Lo script è utilizzato per:
 └─────────────┘      └──────────────┘
 ```
 
-### 2.2 Dipendenze
+### 2.2 Dependencies
 ```python
-requests                 # HTTP API calls a Shopify
-mysql-connector-python   # Connessione database MySQL
+requests                 # HTTP API calls to Shopify
+mysql-connector-python   # MySQL database connection
 ```
 
 ---
 
-## 3. CONFIGURAZIONE
+## 3. CONFIGURATION
 
-### 3.1 Variabili d'Ambiente Richieste
+### 3.1 Required Environment Variables
 
-| Variabile | Descrizione | Esempio |
+| Variable | Description | Example |
 |-----------|-------------|---------|
-| `SHOPIFY_DOMAIN` | Dominio store Shopify | `racoon-lab.myshopify.com` |
-| `SHOPIFY_TOKEN` | Access token API Admin | `shpat_xxxxxxxxxxxxx` |
-| `DB_HOST` | Host database MySQL | `mysql.render.com` |
-| `DB_USER` | Username database | `admin` |
-| `DB_PASS` | Password database | `********` |
-| `DB_NAME` | Nome database | `shopify_sync` |
-| `PRODUCT_IDS` | IDs prodotti (comma-separated) | `15389702455628,12345678` |
+| `SHOPIFY_DOMAIN` | Shopify store domain | `racoon-lab.myshopify.com` |
+| `SHOPIFY_TOKEN` | Admin API access token | `shpat_xxxxxxxxxxxxx` |
+| `DB_HOST` | MySQL database host | `mysql.render.com` |
+| `DB_USER` | Database username | `admin` |
+| `DB_PASS` | Database password | `********` |
+| `DB_NAME` | Database name | `shopify_sync` |
+| `PRODUCT_IDS` | Product IDs (comma-separated) | `15389702455628,12345678` |
 
-### 3.2 File di Configurazione
+### 3.2 Config Files
 
 **render.yaml**
 ```yaml
 services:
   - type: cron
     name: reset-variants
-    schedule: "0 0 31 2 *"  # Mai - solo trigger manuale
+    schedule: "0 0 31 2 *"  # Never - manual trigger only
     runtime: python
     buildCommand: "pip install -r requirements.txt"
     startCommand: "python reset_variants.py"
@@ -100,110 +100,110 @@ mysql-connector-python
 
 ---
 
-## 4. FLUSSO OPERATIVO DETTAGLIATO
+## 4. DETAILED OPERATIONAL FLOW
 
-### 4.1 Overview Logico
+### 4.1 Logical Overview
 
 ```
 START
   │
-  ├─ Connessione DB & Setup tabelle temporanee
+  ├─ DB connection & temporary tables setup
   │
-  └─ Per ogni PRODUCT_ID:
+  └─ For each PRODUCT_ID:
        │
-       ├─ STEP 1: Fetch tutte le varianti da Shopify
+       ├─ STEP 1: Fetch all variants from Shopify
        │
-       ├─ STEP 2: Backup in MySQL
-       │    ├─ Dati variante (JSON completo)
-       │    └─ Inventory levels (tutte le location)
+       ├─ STEP 2: Backup to MySQL
+       │    ├─ Variant data (full JSON)
+       │    └─ Inventory levels (all locations)
        │
-       ├─ STEP 3: Cancella varianti 2-N
+       ├─ STEP 3: Delete variants 2-N
        │
-       ├─ STEP 4: Ricrea varianti 2-N da backup
-       │    └─ Skip varianti con "perso" nel titolo
+       ├─ STEP 4: Recreate variants 2-N from backup
+       │    └─ Skip variants with "perso" in the title
        │
-       ├─ STEP 5: Cancella variante #1
+       ├─ STEP 5: Delete variant #1
        │
-       ├─ STEP 6: Ricrea variante #1 da backup
-       │    └─ Skip se contiene "perso"
+       ├─ STEP 6: Recreate variant #1 from backup
+       │    └─ Skip if it contains "perso"
        │
-       ├─ STEP 7: Ripristina inventory levels
-       │    └─ Per ogni location originale
+       ├─ STEP 7: Restore inventory levels
+       │    └─ For each original location
        │
-       └─ STEP 8: Cleanup location extra
-            └─ Rimuove location non presenti nell'originale
+       └─ STEP 8: Cleanup extra locations
+            └─ Remove locations not present in the original
 END
 ```
 
-### 4.2 STEP 1: Fetch Varianti
+### 4.2 STEP 1: Fetch Variants
 
 **Endpoint**: `GET /admin/api/2024-04/products/{id}/variants.json`
 
-**Dati recuperati per ogni variante**:
-- `id`: ID univoco variante
-- `inventory_item_id`: ID inventory item
-- `option1`, `option2`, `option3`: Valori opzioni
-- `price`, `compare_at_price`: Prezzi
-- `sku`, `barcode`: Codici identificativi
-- `inventory_management`: Tracking inventory (shopify/null)
-- `inventory_policy`: Politica vendita (deny/continue)
-- `weight`, `weight_unit`: Peso prodotto
-- Altri campi (taxable, requires_shipping, etc.)
+**Data retrieved per variant**:
+- `id`: unique variant ID
+- `inventory_item_id`: inventory item ID
+- `option1`, `option2`, `option3`: option values
+- `price`, `compare_at_price`: prices
+- `sku`, `barcode`: identifier codes
+- `inventory_management`: inventory tracking (shopify/null)
+- `inventory_policy`: sales policy (deny/continue)
+- `weight`, `weight_unit`: product weight
+- Other fields (taxable, requires_shipping, etc.)
 
-### 4.3 STEP 2: Backup Database
+### 4.3 STEP 2: Database Backup
 
-**Tabelle temporanee create**:
+**Temporary tables created**:
 
 ```sql
--- Backup varianti
+-- Variant backup
 CREATE TEMPORARY TABLE variant_backup (
     id BIGINT,
     product_id BIGINT,
     inventory_item_id BIGINT,
-    variant_json TEXT,           -- JSON completo variante
-    position INT,                -- Posizione originale
+    variant_json TEXT,           -- Full variant JSON
+    position INT,                -- Original position
     PRIMARY KEY (product_id, id)
 );
 
--- Backup inventory levels
+-- Inventory levels backup
 CREATE TEMPORARY TABLE inventory_backup (
     variant_id BIGINT,
     inventory_item_id BIGINT,
-    location_id BIGINT,          -- ID location Shopify
-    available INT,               -- Quantità disponibile
+    location_id BIGINT,          -- Shopify location ID
+    available INT,               -- Available quantity
     PRIMARY KEY (variant_id, location_id)
 );
 ```
 
-**Processo backup inventory**:
-1. Per ogni variante con `inventory_management != null`
-2. Chiama `GET /inventory_levels.json?inventory_item_ids={id}`
-3. Salva **tutte** le location con relative quantità
+**Inventory backup process**:
+1. For each variant with `inventory_management != null`
+2. Call `GET /inventory_levels.json?inventory_item_ids={id}`
+3. Save **all** locations with their quantities
 
-### 4.4 STEP 3-6: Strategia Delete & Recreate
+### 4.4 STEP 3-6: Delete & Recreate Strategy
 
-**Logica senza DUMMY** (compatibile con metafield):
+**Logic without DUMMY** (metafield-compatible):
 
 ```
-Varianti originali: [V1, V2, V3, ..., VN]
+Original variants: [V1, V2, V3, ..., VN]
 
-1. Delete V2-VN     → Resta solo [V1]
-2. Recreate V2-VN   → Ora: [V1, V2', V3', ..., VN']
-3. Delete V1        → Resta: [V2', V3', ..., VN']
-4. Recreate V1      → Finale: [V1', V2', V3', ..., VN']
+1. Delete V2-VN     → Only [V1] remains
+2. Recreate V2-VN   → Now: [V1, V2', V3', ..., VN']
+3. Delete V1        → Remaining: [V2', V3', ..., VN']
+4. Recreate V1      → Final: [V1', V2', V3', ..., VN']
 ```
 
-**Motivo della strategia**:
-Shopify richiede sempre almeno 1 variante attiva. Non è possibile cancellare tutte le varianti contemporaneamente.
+**Reason for the strategy**:
+Shopify always requires at least 1 active variant. It is not possible to delete all variants simultaneously.
 
-**Filtro "perso"**:
+**"perso" filter**:
 ```python
 if "perso" in v.get("title", "").lower():
-    # Skip ricreazione di questa variante
+    # Skip recreation of this variant
     continue
 ```
 
-### 4.5 STEP 7: Ripristino Inventory
+### 4.5 STEP 7: Inventory Restore
 
 **Endpoint**: `POST /admin/api/2024-04/inventory_levels/set.json`
 
@@ -216,34 +216,34 @@ if "perso" in v.get("title", "").lower():
 }
 ```
 
-**Mapping varianti**:
-- Dizionario `{old_variant_id: new_inventory_item_id}`
-- Query al DB: recupera location e quantità per `old_variant_id`
-- Set inventory sul `new_inventory_item_id`
+**Variant mapping**:
+- Dictionary `{old_variant_id: new_inventory_item_id}`
+- DB query: retrieve location and quantity for `old_variant_id`
+- Set inventory on the `new_inventory_item_id`
 
-### 4.6 STEP 8: Cleanup Location Extra
+### 4.6 STEP 8: Extra Location Cleanup
 
-**Problema risolto**:
-Quando Shopify crea una nuova variante con inventory_management attivo, crea automaticamente inventory_levels per **tutte** le location disponibili nel negozio (default a 0).
+**Problem solved**:
+When Shopify creates a new variant with active inventory_management, it automatically creates inventory_levels for **all** locations available in the store (default 0).
 
-**Soluzione**:
-1. Query DB: quali location aveva la variante originale?
-2. Fetch attuali: quali location ha la variante nuova?
-3. Per ogni location NON presente nell'originale → DELETE
+**Solution**:
+1. DB query: which locations did the original variant have?
+2. Current fetch: which locations does the new variant have?
+3. For each location NOT present in the original → DELETE
 
 **Endpoint**: `DELETE /admin/api/2024-04/inventory_levels.json?inventory_item_id={id}&location_id={loc}`
 
-**Risultato**:
-- Location originali: mantenute con quantità corrette
-- Location extra: rimosse → stato "Non stoccato" in Shopify
+**Result**:
+- Original locations: kept with correct quantities
+- Extra locations: removed → "Not stocked" state in Shopify
 
 ---
 
-## 5. GESTIONE ERRORI E RESILIENZA
+## 5. ERROR HANDLING AND RESILIENCE
 
 ### 5.1 Rate Limiting
 
-**Strategia Exponential Backoff**:
+**Exponential Backoff Strategy**:
 ```python
 def safe_request(method, url, max_retries=5):
     for attempt in range(max_retries):
@@ -253,18 +253,18 @@ def safe_request(method, url, max_retries=5):
             continue
 ```
 
-**Limiti Shopify**:
-- 2 chiamate/secondo per endpoint (bucket leaky)
-- Sleep 0.6s tra chiamate consecutive (safety margin)
+**Shopify limits**:
+- 2 calls/second per endpoint (leaky bucket)
+- 0.6s sleep between consecutive calls (safety margin)
 
-### 5.2 Errori HTTP
+### 5.2 HTTP Errors
 
-**Codici gestiti**:
-- `429`: Rate limit → Retry con backoff
-- `422`: Validation error → Log dettagliato + skip
-- `4xx/5xx`: Altri errori → Log + eccezione
+**Handled codes**:
+- `429`: rate limit → retry with backoff
+- `422`: validation error → detailed log + skip
+- `4xx/5xx`: other errors → log + exception
 
-**Logging errori**:
+**Error logging**:
 ```python
 try:
     error_detail = res.json()
@@ -275,49 +275,49 @@ except:
 
 ### 5.3 Database Connection
 
-**Auto-reconnect**: Non implementato (esecuzione breve)  
-**Transazioni**: Commit esplicito dopo ogni backup  
-**Tabelle temporanee**: Auto-distrutte a fine sessione
+**Auto-reconnect**: not implemented (short execution)  
+**Transactions**: explicit commit after each backup  
+**Temporary tables**: auto-destroyed at end of session
 
 ---
 
-## 6. LOGGING E MONITORAGGIO
+## 6. LOGGING AND MONITORING
 
-### 6.1 Formato Log
+### 6.1 Log Format
 
 ```
-[YYYY-MM-DD HH:MM:SS] {emoji} Messaggio
+[YYYY-MM-DD HH:MM:SS] {emoji} Message
 ```
 
-**Emoji utilizzati**:
-- 📦 Elaborazione prodotto
-- 🔍 Trovate varianti
-- 💾 Backup dati
-- 🗑️ Cancellazione
-- 🔄 Ricreazione
+**Emojis used**:
+- 📦 Product processing
+- 🔍 Variants found
+- 💾 Data backup
+- 🗑️ Deletion
+- 🔄 Recreation
 - 📍 Inventory operations
 - 🧹 Cleanup
-- ✅ Successo
-- ❌ Errore
+- ✅ Success
+- ❌ Error
 - ⚠️ Warning
 - ⏭️ Skip
 
-### 6.2 Livelli di Dettaglio
+### 6.2 Detail Levels
 
-**Livello 1 - Prodotto**:
+**Level 1 - Product**:
 ```
 [timestamp] 📦 Elaborazione prodotto: 15389702455628
 [timestamp] ✅ Prodotto 15389702455628 completato con successo!
 ```
 
-**Livello 2 - Step**:
+**Level 2 - Step**:
 ```
 [timestamp] 🔍 Trovate 12 varianti
 [timestamp] 💾 Backup varianti e inventory levels...
 [timestamp] 🗑️ Cancellazione varianti dalla 2 alla N...
 ```
 
-**Livello 3 - Dettaglio**:
+**Level 3 - Detail**:
 ```
 [timestamp]   💾 Backup inventory: variant 56062973968716, location 8251572336, qty 0
 [timestamp]   ✅ Cancellata variante 56062975082828 (Outlet - 42)
@@ -326,210 +326,210 @@ except:
 
 ---
 
-## 7. CASI D'USO E SCENARI
+## 7. USE CASES AND SCENARIOS
 
-### 7.1 Caso A: Prodotto Standard (senza metafield)
+### 7.1 Case A: Standard Product (no metafield)
 
-**Caratteristiche**:
-- Taglie NON collegate a metafield
+**Characteristics**:
+- Sizes NOT linked to metafields
 - Inventory in "magazzino" location
-- Tutte le varianti da mantenere
+- All variants to keep
 
-**Comportamento**:
-✅ Delete & recreate senza errori  
-✅ Inventory ripristinato correttamente  
-✅ Location "magazzino" mantenuta  
-✅ Location extra rimosse
+**Behavior**:
+✅ Delete & recreate with no errors  
+✅ Inventory correctly restored  
+✅ "magazzino" location kept  
+✅ Extra locations removed
 
-### 7.2 Caso B: Prodotto con Metafield su Option
+### 7.2 Case B: Product with Option Metafield
 
-**Caratteristiche**:
-- Taglie collegate a metafield Shopify
-- Inventory in location "promo"
-- Alcune varianti con "perso" da skippare
+**Characteristics**:
+- Sizes linked to Shopify metafields
+- Inventory in "promo" location
+- Some variants with "perso" to skip
 
-**Comportamento**:
-✅ Strategia senza DUMMY funziona (no modifica option values)  
-✅ Inventory in "promo" ripristinato  
-✅ Location "magazzino" rimossa → "Non stoccato"  
-✅ Varianti "perso" non ricreate
+**Behavior**:
+✅ Non-DUMMY strategy works (no option-value edits)  
+✅ Inventory in "promo" restored  
+✅ "magazzino" location removed → "Not stocked"  
+✅ "perso" variants not recreated
 
-### 7.3 Caso C: Prodotto Multi-Location
+### 7.3 Case C: Multi-Location Product
 
-**Caratteristiche**:
-- Inventory distribuito su 3+ location
-- Quantità diverse per location
-- Mix di varianti con/senza inventory tracking
+**Characteristics**:
+- Inventory spread across 3+ locations
+- Different quantities per location
+- Mix of variants with/without inventory tracking
 
-**Comportamento**:
-✅ Tutte le location originali mantenute  
-✅ Quantità corrette per ogni location  
-✅ Varianti senza tracking → skip cleanup  
-✅ Location extra rimosse
+**Behavior**:
+✅ All original locations kept  
+✅ Correct quantities per location  
+✅ Variants without tracking → skip cleanup  
+✅ Extra locations removed
 
 ---
 
-## 8. LIMITAZIONI E VINCOLI
+## 8. LIMITATIONS AND CONSTRAINTS
 
-### 8.1 Limitazioni Tecniche
+### 8.1 Technical Limitations
 
 1. **Shopify API Limits**:
    - Max 2 req/sec per endpoint
-   - Timeout dopo 5 retry (max 31 secondi)
+   - Timeout after 5 retries (max 31 seconds)
 
-2. **Varianti con Immagini**:
-   - Le associazioni immagine-variante NON sono preservate
-   - Richiede associazione manuale post-script
+2. **Variants with Images**:
+   - Image-variant associations are NOT preserved
+   - Manual association required post-script
 
-3. **Metafield Variante**:
-   - Solo metafield su product/option sono gestiti
-   - Metafield custom sulle varianti NON vengono copiati
+3. **Variant Metafields**:
+   - Only product/option metafields are handled
+   - Custom variant metafields are NOT copied
 
-4. **Limiti MySQL**:
-   - Tabelle temporanee: max session lifetime
+4. **MySQL Limits**:
+   - Temporary tables: max session lifetime
    - TEXT field: max 65KB per variant_json
 
-### 8.2 Vincoli Operativi
+### 8.2 Operational Constraints
 
 1. **Product IDs**:
-   - Devono essere validi e accessibili con il token fornito
-   - Prodotto deve avere almeno 1 variante
+   - Must be valid and accessible with the provided token
+   - Product must have at least 1 variant
 
 2. **Database**:
-   - Deve essere accessibile durante tutta l'esecuzione
-   - Permessi: CREATE TEMPORARY TABLE, SELECT, INSERT, DELETE
+   - Must be accessible throughout execution
+   - Permissions: CREATE TEMPORARY TABLE, SELECT, INSERT, DELETE
 
-3. **Tempo Esecuzione**:
-   - ~1 minuto per prodotto con 10 varianti
-   - ~30 secondi per backup/restore inventory
-   - Render timeout: 300s (5 minuti) per job cron
+3. **Execution Time**:
+   - ~1 minute per product with 10 variants
+   - ~30 seconds for inventory backup/restore
+   - Render timeout: 300s (5 minutes) per cron job
 
 ---
 
 ## 9. TROUBLESHOOTING
 
-### 9.1 Errori Comuni
+### 9.1 Common Errors
 
-#### Errore: "Cannot set name for an option value linked to a metafield"
+#### Error: "Cannot set name for an option value linked to a metafield"
 
-**Causa**: Prodotto con metafield su option  
-**Soluzione**: Già gestito - strategia senza DUMMY  
-**Verifica**: Log mostra strategia delete 2-N → recreate 2-N → delete 1 → recreate 1
+**Cause**: product with metafield on option  
+**Fix**: already handled — non-DUMMY strategy  
+**Verify**: log shows delete 2-N → recreate 2-N → delete 1 → recreate 1
 
-#### Errore: "The variant 'X' already exists"
+#### Error: "The variant 'X' already exists"
 
-**Causa**: Variante non cancellata correttamente nello step precedente  
-**Soluzione**: 
-1. Verificare log step 3/5 (cancellazione)
-2. Controllare permission token Shopify
-3. Retry manuale
+**Cause**: variant not properly deleted in previous step  
+**Fix**:
+1. Check step 3/5 logs (deletion)
+2. Verify Shopify token permissions
+3. Manual retry
 
-#### Errore: "422 Client Error" durante ricreazione
+#### Error: "422 Client Error" during recreation
 
-**Causa**: Dati variante non validi (SKU duplicato, option non valida, etc.)  
-**Log**: Mostra dettagli errore JSON di Shopify  
-**Soluzione**: Correggere dati nel prodotto originale, poi retry
+**Cause**: invalid variant data (duplicate SKU, invalid option, etc.)  
+**Log**: shows Shopify JSON error details  
+**Fix**: correct data in original product, then retry
 
-### 9.2 Inventory Non Corretto
+### 9.2 Incorrect Inventory
 
-#### Location "Magazzino" a 0 invece di "Non stoccato"
+#### "Magazzino" location at 0 instead of "Not stocked"
 
-**Causa**: Step 8 (cleanup) non eseguito correttamente  
-**Verifica**: Cercare nei log "🧹 Pulizia location inventory"  
-**Soluzione**: 
-1. Verificare che inventory_backup contenga dati
-2. Controllare mapping variant_id corretto
-3. Manual cleanup via Shopify admin se necessario
+**Cause**: STEP 8 (cleanup) not executed correctly  
+**Verify**: search logs for "🧹 Pulizia location inventory"  
+**Fix**:
+1. Verify inventory_backup contains data
+2. Check correct variant_id mapping
+3. Manual cleanup via Shopify admin if needed
 
-#### Quantità perse dopo script
+#### Quantities lost after script
 
-**Causa**: Backup inventory non salvato (inventory_management = null)  
-**Verifica**: Log deve mostrare "💾 Backup inventory" per ogni variante  
-**Soluzione**: Verificare che varianti originali avevano inventory_management attivo
+**Cause**: inventory backup not saved (inventory_management = null)  
+**Verify**: log must show "💾 Backup inventory" for each variant  
+**Fix**: verify original variants had active inventory_management
 
 ### 9.3 Performance Issues
 
-#### Script lento (>5 minuti)
+#### Slow script (>5 minutes)
 
-**Causa**: Troppi prodotti o varianti  
-**Soluzione**: 
-1. Ridurre numero prodotti in PRODUCT_IDS
-2. Aumentare timeout Render (max 900s per web service)
-3. Ottimizzare sleep time (rischio rate limit)
+**Cause**: too many products or variants  
+**Fix**:
+1. Reduce number of products in PRODUCT_IDS
+2. Increase Render timeout (max 900s for web service)
+3. Optimize sleep time (rate-limit risk)
 
-#### Rate limit frequenti
+#### Frequent rate limits
 
-**Causa**: Sleep time insufficiente  
-**Soluzione**: Aumentare sleep da 0.6s a 1.0s
+**Cause**: insufficient sleep time  
+**Fix**: increase sleep from 0.6s to 1.0s
 
 ---
 
-## 10. MANUTENZIONE E EVOLUZIONE
+## 10. MAINTENANCE AND EVOLUTION
 
-### 10.1 Aggiornamenti Shopify API
+### 10.1 Shopify API Updates
 
-**Versione attuale**: 2024-04  
-**Prossimo update**: Verificare deprecation ogni 3 mesi  
-**Breaking changes**: Testare su store dev prima di produzione
+**Current version**: 2024-04  
+**Next update**: check deprecations every 3 months  
+**Breaking changes**: test on dev store before production
 
-### 10.2 Monitoraggio Continuo
+### 10.2 Continuous Monitoring
 
-**KPI da tracciare**:
-- Tempo medio elaborazione per prodotto
-- Tasso errori 422 (validazione)
-- Tasso successo inventory restore
-- Numero location cleanup per run
+**KPIs to track**:
+- Average processing time per product
+- 422 (validation) error rate
+- Inventory restore success rate
+- Number of location cleanups per run
 
-### 10.3 Backup e Recovery
+### 10.3 Backup and Recovery
 
-**Backup automatico**:
-- Tabelle MySQL temporanee → NON persistenti
-- Considerare dump pre-script per prodotti critici
+**Automatic backup**:
+- Temporary MySQL tables → NOT persistent
+- Consider pre-script dump for critical products
 
 **Recovery procedure**:
-1. Identificare prodotto corrotto
-2. Recuperare dati originali da store history/backup
+1. Identify corrupted product
+2. Recover original data from store history/backup
 3. Manual fix via Shopify admin
 4. Retry script
 
 ---
 
-## 11. SECURITY E COMPLIANCE
+## 11. SECURITY AND COMPLIANCE
 
-### 11.1 Gestione Credenziali
+### 11.1 Credential Management
 
-- ✅ Token API in variabili d'ambiente (non hardcoded)
-- ✅ Database password in variabili d'ambiente
-- ⚠️ Logging NON deve includere token/password
+- ✅ API token in environment variables (not hardcoded)
+- ✅ Database password in environment variables
+- ⚠️ Logging must NOT include token/password
 
-### 11.2 Accesso Dati
+### 11.2 Data Access
 
-**Permessi token Shopify richiesti**:
+**Required Shopify token scopes**:
 - `read_products`
 - `write_products`
 - `read_inventory`
 - `write_inventory`
 
-**Permessi database**:
+**Database permissions**:
 - CREATE TEMPORARY TABLE
-- SELECT, INSERT, DELETE su tabelle temporanee
+- SELECT, INSERT, DELETE on temporary tables
 
 ### 11.3 Audit Trail
 
-**Log conservati su**:
-- Render dashboard (7 giorni)
-- Considerare export su storage esterno per audit
+**Logs retained on**:
+- Render dashboard (7 days)
+- Consider exporting to external storage for audit
 
 ---
 
-## 12. CONTATTI E SUPPORTO
+## 12. CONTACTS AND SUPPORT
 
-**Manutentore**: Racoon s.r.l.  
-**Piattaforma**: Render.com  
+**Maintainer**: Racoon s.r.l.  
+**Platform**: Render.com  
 **Store**: racoon-lab.myshopify.com  
 **Database**: MySQL on Render
 
-**Documentazione esterna**:
+**External documentation**:
 - [Shopify Admin API](https://shopify.dev/api/admin-rest)
 - [Inventory Management](https://shopify.dev/api/admin-rest/2024-04/resources/inventorylevel)
 - [Render Cron Jobs](https://render.com/docs/cronjobs)
@@ -539,20 +539,20 @@ except:
 ## CHANGELOG
 
 ### v3.0 (2025-11-25)
-- ✅ Aggiunto cleanup location inventory extra (STEP 8)
-- ✅ Fix: query DB diretta per original_locations
-- ✅ Logging dettagliato per debugging cleanup
+- ✅ Added extra location inventory cleanup (STEP 8)
+- ✅ Fix: direct DB query for original_locations
+- ✅ Detailed logging for cleanup debugging
 
 ### v2.0 (2025-11-25)
-- ✅ Eliminata strategia DUMMY (compatibilità metafield)
-- ✅ Nuova logica: delete 2-N → recreate 2-N → delete 1 → recreate 1
-- ✅ Aggiunto filtro "perso" nel titolo varianti
+- ✅ Removed DUMMY strategy (metafield compatibility)
+- ✅ New logic: delete 2-N → recreate 2-N → delete 1 → recreate 1
+- ✅ Added "perso" filter on variant title
 
 ### v1.0 (2025-11-25)
-- ✅ Implementazione iniziale con strategia DUMMY
-- ✅ Backup inventory multi-location
-- ✅ Ripristino inventory levels
+- ✅ Initial implementation with DUMMY strategy
+- ✅ Multi-location inventory backup
+- ✅ Inventory level restore
 
 ---
 
-**Fine Documento**
+**End of Document**

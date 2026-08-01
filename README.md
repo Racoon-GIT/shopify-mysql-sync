@@ -1,56 +1,57 @@
 # shopify-mysql-sync
 
-Sync giornaliero prodotti Shopify -> MySQL via GraphQL Admin API.
-Popola la tabella `online_products` letta da Feed-Exporter, SEO-PILOT e altri progetti.
+Daily Shopify -> MySQL product sync via GraphQL Admin API.
+Populates the `online_products` table read by Feed-Exporter, SEO-PILOT and other projects.
 
 ## Stack
 
 - **Python 3** + Flask + Gunicorn
-- **Shopify GraphQL Admin API** (~10 prodotti/pagina, ~75 chiamate per ~750 prodotti attivi)
-- **MySQL** (database condiviso `racoon`)
+- **Shopify GraphQL Admin API** (~10 products/page, ~75 calls for ~750 active products)
+- **MySQL** (shared database `racoon`)
 - **Deploy**: Render.com (web service free tier, Frankfurt)
 
-## Servizi
+## Services
 
-| Servizio | Tipo | Descrizione |
+| Service | Type | Description |
 |----------|------|-------------|
-| `shopify-mysql-sync` | Web Service | Sync giornaliero, triggerato da Scheduler |
-| `reset-variants` | Cron Job | Reset varianti con backup inventory (solo manuale) |
+| `shopify-mysql-sync` | Web Service | Daily sync, triggered by Scheduler |
+| `reset-variants` | Cron Job | Variant reset with inventory backup (manual only) |
 
 ## Endpoints
 
-| Endpoint | Metodo | Descrizione |
+| Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/health` | GET | Health check |
-| `/api/trigger` | GET/POST | Avvia sync (richiede `TRIGGER_SECRET`) |
-| `/api/status` | GET | Stato ultima sincronizzazione |
-| `/` | GET | Info servizio |
+| `/api/trigger` | GET/POST | Starts sync. Accepts `Authorization: Bearer <TRIGGER_SECRET>` (preferred), `X-Trigger-Secret` header, or `?secret=` query param (deprecated, still supported) |
+| `/api/status` | GET | Status of last sync |
+| `/` | GET | Service info |
 
 ## Env vars
 
 ```
-SHOPIFY_DOMAIN          # es. racoon-lab.myshopify.com
-SHOPIFY_TOKEN           # Access token Shopify Admin API
+SHOPIFY_DOMAIN          # e.g. racoon-lab.myshopify.com
+SHOPIFY_TOKEN           # Shopify Admin API access token
 SHOPIFY_API_VERSION     # Default: 2024-04
 DB_HOST                 # MySQL host
 DB_USER                 # MySQL user
-DB_PASS                 # MySQL password (NON DB_PASSWORD)
+DB_PASS                 # MySQL password (NOT DB_PASSWORD)
 DB_NAME                 # MySQL database name
-TRIGGER_SECRET          # Token auth per /api/trigger (opzionale)
-PRODUCT_IDS             # Solo per reset_variants (comma-separated)
+TRIGGER_SECRET          # Auth token for /api/trigger (optional)
+PRODUCT_IDS             # Only for reset_variants (comma-separated)
 ```
 
-## Flusso
+## Flow
 
 ```
-Scheduler (03:00 Roma) --> GET /api/trigger?secret=XXX --> 202
-                           |
+Scheduler (03:00 Rome) --> GET /api/trigger (Authorization: Bearer XXX) --> 202
+                           |  (?secret=XXX still accepted but deprecated,
+                           |   pending SERVER updating the Scheduler job record)
                            v
                     Background thread:
-                    1. Fetch prodotti via GraphQL (filtro per tag)
-                    2. Upsert su online_products
-                    3. Track price_history se prezzi cambiano
-                    4. Rimuovi varianti scomparse
+                    1. Fetch products via GraphQL (filter by tag)
+                    2. Upsert into online_products
+                    3. Track price_history if prices change
+                    4. Remove disappeared variants
 ```
 
 ## Test

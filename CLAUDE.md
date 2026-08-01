@@ -1,6 +1,6 @@
 # shopify-mysql-sync
 
-Daily **Shopify → MySQL** sync via GraphQL. Feeds the `online_products` table read by Feed-Exporter, SEO-PILOT, Price_Bulk-UPDT, and others.
+Daily **Shopify → MySQL** sync via GraphQL. Feeds the `online_products` table read by multiple downstream projects (authoritative reader list: `../docs/shared-database.md`).
 
 ## Stack
 - Python + Flask + Shopify GraphQL → Render FREE web service `shopify-sync-ws`.
@@ -9,18 +9,18 @@ Daily **Shopify → MySQL** sync via GraphQL. Feeds the `online_products` table 
 ## Trigger architecture
 
 - Render Web Service `shopify-sync-ws` (FREE, Frankfurt).
-- Triggered by Scheduler at **03:00 Rome** via `GET /api/trigger`.
+- Triggered by Scheduler at **03:00 Rome** via `GET /api/trigger`, auth `Authorization: Bearer` (`?secret=` deprecated but still accepted, pending SERVER updating the job record — handoff 2026-08-01).
 - `/api/trigger` returns **immediate `202`**, sync runs in a background thread (~60s).
 - `/api/status` to check last execution status.
 - KeepAlive from Scheduler `*/5 2-3 * * *` to wake the service before the sync.
 
 ## Always-on rules
 
-1. **`online_products` is read by 5+ projects**: do NOT change the schema without checking consumers (Feed-Exporter, SEO-PILOT, Price_Bulk-UPDT, etc.). See `../docs/shared-database.md`.
+1. **`online_products` is read by multiple downstream projects**: do NOT change the schema without checking consumers — authoritative reader list in `../docs/shared-database.md`.
 2. **Mandatory tag filter**: the sync only includes products with tags `sneakers personalizzate`, `scarpe personalizzate`, `ciabatte personalizzate`, `stivali personalizzati`. Changing the list impacts all consumers.
 3. **Sleep 0.5s between mutating REST calls** (POST/DELETE), exponential backoff on 429/502-504.
 4. **GraphQL preferred**: ~75 calls vs ~9000 with REST. 10 products/page, 1000 points/query limit.
-5. **Coverage test** (`/usr/bin/python3 -m pytest`): mock Shopify/MySQL (no external deps). Files: `test_sync.py`, `test_app.py`.
+5. **Coverage test** (`/usr/bin/python3 -m pytest`): mock Shopify/MySQL (no external deps). Files: `test_sync.py`, `test_app.py`, `test_reset.py`.
 6. **Keepalive must precede the trigger**: same pattern as Feed-Exporter. Reversed = cold-start fail.
 
 ## Env vars
