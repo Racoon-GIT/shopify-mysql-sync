@@ -60,12 +60,13 @@ def _bearer_token(auth_header):
 
 
 def _is_authorized():
-    """True se uno qualsiasi dei trasporti presenta il TRIGGER_SECRET corretto.
+    """True se uno dei due trasporti presenta il TRIGGER_SECRET corretto.
 
-    `Authorization: Bearer` e' il trasporto target (Scheduler). `X-Trigger-Secret`
-    e `?secret=` restano per compatibilita' finche' SERVER non aggiorna il record
-    del job (handoff 2026-08-01): togliere la query string prima romperebbe in
-    silenzio il sync delle 03:00 Rome.
+    Il trasporto `?secret=` in query string e' stato rimosso il 2026-08-03,
+    dopo conferma di SERVER che il record del job Scheduler e' stato ripulito
+    (url senza segreto, credenziale in `scheduler_jobs.headers`). Non
+    reintrodurlo: un segreto nell'URL finisce in chiaro nei backup MySQL e
+    negli access-log di Render.
     """
     if not TRIGGER_SECRET:
         return True
@@ -73,7 +74,6 @@ def _is_authorized():
     candidates = (
         _bearer_token(request.headers.get("Authorization")),
         request.headers.get("X-Trigger-Secret"),
-        request.args.get("secret"),
     )
     return any(
         c is not None and hmac.compare_digest(c.encode("utf-8"), expected)

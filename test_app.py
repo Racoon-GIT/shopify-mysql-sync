@@ -68,10 +68,10 @@ class TestTriggerWithAuth:
         response = client_with_auth.get("/api/trigger?secret=wrong")
         assert response.status_code == 401
 
-    @patch("app.run_sync")
-    def test_trigger_with_correct_query_param(self, mock_sync, client_with_auth):
+    def test_trigger_with_query_param_now_returns_401(self, client_with_auth):
+        """Il trasporto ?secret= e' stato rimosso il 2026-08-03: non e' una regressione."""
         response = client_with_auth.get("/api/trigger?secret=test-secret-123")
-        assert response.status_code == 202
+        assert response.status_code == 401
 
     @patch("app.run_sync")
     def test_trigger_with_correct_header(self, mock_sync, client_with_auth):
@@ -125,11 +125,18 @@ class TestTriggerWithAuth:
         )
         assert response.status_code == 401
 
-    @patch("app.run_sync")
-    def test_trigger_with_correct_query_param_no_auth_header(self, mock_sync, client_with_auth):
-        """Regressione: il vecchio contratto ?secret= senza Authorization deve restare valido."""
+    def test_trigger_with_query_param_no_auth_header_now_returns_401(self, client_with_auth):
+        """Il vecchio contratto ?secret= senza Authorization e' stato rimosso il 2026-08-03."""
         response = client_with_auth.get("/api/trigger?secret=test-secret-123")
-        assert response.status_code == 202
+        assert response.status_code == 401
+
+    def test_trigger_with_correct_query_param_and_wrong_bearer_returns_401(self, client_with_auth):
+        """La query string non puo' piu' 'salvare' una richiesta con bearer sbagliato."""
+        response = client_with_auth.get(
+            "/api/trigger?secret=test-secret-123",
+            headers={"Authorization": "Bearer wrong"}
+        )
+        assert response.status_code == 401
 
     def test_401_exposes_www_authenticate_bearer_header(self, client_with_auth):
         response = client_with_auth.get("/api/trigger")

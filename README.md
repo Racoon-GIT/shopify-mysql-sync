@@ -22,7 +22,7 @@ Populates the `online_products` table read by Feed-Exporter, SEO-PILOT and other
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/health` | GET | Health check |
-| `/api/trigger` | GET/POST | Starts sync. Accepts `Authorization: Bearer <TRIGGER_SECRET>` (preferred), `X-Trigger-Secret` header, or `?secret=` query param (deprecated, still supported) |
+| `/api/trigger` | GET/POST | Starts sync. Accepts `Authorization: Bearer <TRIGGER_SECRET>` (preferred) or `X-Trigger-Secret` header |
 | `/api/status` | GET | Status of last sync |
 | `/` | GET | Service info |
 
@@ -44,8 +44,6 @@ PRODUCT_IDS             # Only for reset_variants (comma-separated)
 
 ```
 Scheduler (03:00 Rome) --> GET /api/trigger (Authorization: Bearer XXX) --> 202
-                           |  (?secret=XXX still accepted but deprecated,
-                           |   pending SERVER updating the Scheduler job record)
                            v
                     Background thread:
                     1. Fetch products via GraphQL (filter by tag)
