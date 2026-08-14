@@ -28,6 +28,7 @@ Daily **Shopify → MySQL** sync via GraphQL. Feeds the `online_products` table 
 ```
 SHOPIFY_DOMAIN, SHOPIFY_TOKEN, SHOPIFY_API_VERSION    # Shopify Admin API
 DB_HOST, DB_USER, DB_PASS, DB_NAME                     # MySQL `racoon` (NB: DB_PASS, NOT DB_PASSWORD)
+DB_CA_CERT                                              # MySQL CA (base64, 1 line) — TLS rollout handoff-13. Unset: loud encrypt-only fallback, not silent. Set but corrupted (bad base64 / not a PEM): raises — a config error must not hide behind a working-looking fallback (src/db.py::build_ssl_config)
 TRIGGER_SECRET                                          # Auth for /api/trigger (optional but recommended)
 PRODUCT_IDS                                             # Only for reset_variants (comma-separated)
 ```
