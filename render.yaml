@@ -25,6 +25,8 @@ services:
         sync: false
       - key: DB_NAME
         sync: false
+      - key: DB_CA_CERT
+        sync: false  # CA MySQL (base64, 1 riga) — rollout TLS handoff-13, vedi docs/tls-rollout-handoff13-2026-06-28.md
       - key: TRIGGER_SECRET
         sync: false
       - key: DEBUG
@@ -56,6 +58,8 @@ services:
         sync: false
       - key: DB_NAME
         sync: false
+      - key: DB_CA_CERT
+        sync: false  # CA MySQL (base64, 1 riga) — rollout TLS handoff-13, vedi docs/tls-rollout-handoff13-2026-06-28.md
       - key: PRODUCT_IDS
         sync: false  # Impostare manualmente prima dell'esecuzione
       - key: DEBUG

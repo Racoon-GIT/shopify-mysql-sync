@@ -3,13 +3,123 @@
 Gestione database MySQL centralizzata.
 """
 
-from typing import Optional, List, Tuple, Any, Set
+import base64
+import binascii
+import os
+import tempfile
+from typing import Optional, List, Tuple, Any, Set, Dict
 from decimal import Decimal
 import mysql.connector
 from mysql.connector import MySQLConnection
 from mysql.connector.cursor import MySQLCursor
 
 from .config import Config, log
+
+
+# Path del file temporaneo con la CA decodificata, riusato per tutto il processo
+# (vedi build_ssl_config): senza, ogni connect() ne lascerebbe uno nuovo in /tmp.
+_ca_file_path: Optional[str] = None
+
+
+def build_ssl_config() -> Dict[str, object]:
+    """
+    Costruisce i parametri TLS per mysql-connector-python verso `racoon`
+    (Hetzner, mysqld 8.0.45) — rollout handoff-13
+    (../docs/tls-rollout-handoff13-2026-06-28.md), riga shopify-sync-ws.
+
+    Il certificato server è self-signed auto-generato da MySQL
+    (CN=MySQL_Server_8.0.45_Auto_Generated_CA_Certificate, non combacia con
+    l'host) → la verifica dell'HOSTNAME va disattivata (`ssl_verify_identity
+    =False`); la verifica della CATENA contro la CA pinnata resta invece
+    attiva (`ssl_verify_cert=True`) quando la CA è disponibile.
+
+    Render non ha filesystem persistente: la CA arriva come base64 su una
+    riga nella env var DB_CA_CERT, decodificata a runtime in un file
+    temporaneo (mysql-connector-python richiede un path per ssl_ca, non
+    accetta bytes in memoria).
+    """
+    ca_b64 = os.environ.get("DB_CA_CERT")
+
+    if not ca_b64:
+        # DB_CA_CERT non impostata: fallback esplicito e rumoroso, NON un
+        # downgrade silenzioso. Scelta coerente con lo stesso rollout su
+        # scheduler-app (Scheduler/src/lib/db.ts::buildSsl) e con il
+        # trade-off già accettato nel documento per stock-check/
+        # price-bulk-updt (§Security level by platform: "encrypt-only...
+        # Acceptable given a controlled egress + 3306 firewall hardening").
+        # Un fail-hard qui fermerebbe l'unico sync giornaliero di
+        # online_products senza un guadagno di sicurezza proporzionato:
+        # OGGI, senza questa modifica, il consumer gira SENZA alcun TLS —
+        # encrypt-only è quindi già un miglioramento netto, non un
+        # downgrade. Se in futuro serve una postura più stretta
+        # specificamente per questo consumer (è il WRITER di
+        # online_products, letto da più progetti a valle), è una decisione
+        # di business da prendere a monte (Ale/SVILUPPO), non da introdurre
+        # qui in modo silenzioso/unilaterale.
+        log(
+            "⚠️ DB_CA_CERT non impostata: connessione a racoon in TLS "
+            "encrypt-only (nessuna verifica della CA). Impostare DB_CA_CERT "
+            "su Render per la verifica completa della catena — vedi "
+            "docs/tls-rollout-handoff13-2026-06-28.md."
+        )
+        return {
+            "ssl_verify_cert": False,
+            "ssl_verify_identity": False,
+        }
+
+    # File temporaneo riusato per tutto il processo: `connect()` viene chiamata
+    # più volte (sync giornaliero + reset manuale) e senza cache ogni chiamata
+    # lascerebbe un .pem in più in /tmp, mai cancellato. Stesso pattern del
+    # consumer gemello feed-server (`Feed-Exporter/src/mysql_client.py`).
+    global _ca_file_path
+    if _ca_file_path and os.path.exists(_ca_file_path):
+        return {
+            "ssl_ca": _ca_file_path,
+            "ssl_verify_cert": True,
+            "ssl_verify_identity": False,
+        }
+
+    try:
+        ca_pem = base64.b64decode(ca_b64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        # A differenza della env var assente (stato transitorio legittimo
+        # durante il rollout), un valore presente ma non decodificabile è
+        # quasi certamente un errore di configurazione (copia-incolla
+        # troncato/corrotto): qui falliamo forte, non silenziosamente in
+        # encrypt-only — nascondere un errore di configurazione dietro un
+        # fallback "silenziosamente funzionante" sarebbe la trappola
+        # peggiore da evitare per chi imposta la variabile credendo di
+        # aver attivato la verifica della CA.
+        raise RuntimeError(
+            f"DB_CA_CERT presente ma non è base64 valido: {exc}"
+        ) from exc
+
+    # Base64 valido non significa certificato: un valore troncato a metà
+    # decodifica senza errori. Il marcatore PEM è il controllo che fa dire
+    # all'errore cosa guardare, invece di lasciarlo emergere dal driver TLS.
+    if b"BEGIN CERTIFICATE" not in ca_pem:
+        raise RuntimeError(
+            f"DB_CA_CERT decodificata ({len(ca_pem)} byte) non contiene un "
+            'certificato PEM ("BEGIN CERTIFICATE" assente): valore troncato o '
+            "file sbagliato. Reimpostare la env var con la CA del server racoon "
+            "codificata in base64 su una riga sola."
+        )
+
+    ca_file = tempfile.NamedTemporaryFile(
+        mode="wb", suffix=".pem", prefix="db-ca-", delete=False
+    )
+    try:
+        ca_file.write(ca_pem)
+    finally:
+        ca_file.close()
+
+    _ca_file_path = ca_file.name
+
+    return {
+        "ssl_ca": ca_file.name,
+        "ssl_verify_cert": True,
+        "ssl_verify_identity": False,
+    }
 
 
 class Database:
@@ -153,7 +263,8 @@ class Database:
             host=self.config.db_host,
             user=self.config.db_user,
             password=self.config.db_pass,
-            database=self.config.db_name
+            database=self.config.db_name,
+            **build_ssl_config()
         )
         self._cursor = self._connection.cursor()
         return self
