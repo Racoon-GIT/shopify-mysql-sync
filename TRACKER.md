@@ -48,3 +48,12 @@ il lavoro sembrava non fatto: il repo non ne portava traccia.
   not support dynamic client registration"*, sia da tool sia dal pannello `/mcp`).
   Via praticabile: REST API `api.render.com/v1` con la API key già presente nella
   config MCP del progetto root.
+
+### `/api/status` non è una prova persistente
+
+Lo stato del servizio vive in RAM: ogni deploy/restart lo azzera e l'endpoint torna a
+`last_status: null, last_run: null, last_error: null`. Verificato il 2026-08-18 dopo il
+deploy `dep-da2cekmgekts739tpseg` (commit `88396a1`, finished `20:58:44Z`), che ha
+cancellato l'evidenza del sync verde delle `19:56:46Z` sopra. Dei `null` letti prima
+della corsa schedulata successiva **non** significano "non ha mai girato". La prova di
+una corsa va cercata qui o nei log di Render, non nell'endpoint.
