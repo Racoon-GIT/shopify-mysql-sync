@@ -27,11 +27,31 @@ def build_ssl_config() -> Dict[str, object]:
     (Hetzner, mysqld 8.0.45) — rollout handoff-13
     (../docs/tls-rollout-handoff13-2026-06-28.md), riga shopify-sync-ws.
 
-    Il certificato server è self-signed auto-generato da MySQL
-    (CN=MySQL_Server_8.0.45_Auto_Generated_CA_Certificate, non combacia con
-    l'host) → la verifica dell'HOSTNAME va disattivata (`ssl_verify_identity
-    =False`); la verifica della CATENA contro la CA pinnata resta invece
-    attiva (`ssl_verify_cert=True`) quando la CA è disponibile.
+    Dal 2026-08-16 il server presenta un certificato emesso dalla `Racoon
+    Internal CA` propria (non più il self-signed auto-generato da MySQL),
+    con SAN = IP:78.46.244.227, DNS:racoon-db-vps1. Con la CA disponibile
+    la verifica dell'HOSTNAME è quindi attiva (`ssl_verify_identity=True`)
+    oltre a quella della CATENA (`ssl_verify_cert=True`): la sessione
+    SERVER l'ha misurato contro la produzione con
+    mysql-connector-python==9.6.0 (versione pinnata) — connessione per IP
+    con `ssl_verify_identity=True` riesce perché l'IP è nel SAN, mentre lo
+    stesso server con un nome assente dal SAN fallisce. La connessione
+    resta per IP: host, CA e DNS non cambiano.
+
+    Attenzione a non generalizzare per analogia: il driver Node `mysql2`
+    ha un difetto di plumbing per cui, connettendosi per IP, la verifica
+    dell'identità non è utilizzabile (passa a `tls.connect` un socket già
+    connesso con `servername undefined`, e Node finisce per confrontare
+    contro `localhost`) — questa configurazione non è quindi trasferibile
+    ai consumer Node di `racoon`. Riferimento gemello già in produzione:
+    `Feed-Exporter/src/mysql_client.py` (commit 77f6e86, live dal
+    2026-08-18).
+
+    Senza CA (DB_CA_CERT non impostata) resta il fallback encrypt-only:
+    `ssl_verify_cert=False` e `ssl_verify_identity=False` — verificare
+    l'identità senza verificare la catena non protegge da niente,
+    chiunque potrebbe presentare un certificato col nome giusto se
+    nessuno controlla chi l'ha firmato.
 
     Render non ha filesystem persistente: la CA arriva come base64 su una
     riga nella env var DB_CA_CERT, decodificata a runtime in un file
@@ -76,7 +96,7 @@ def build_ssl_config() -> Dict[str, object]:
         return {
             "ssl_ca": _ca_file_path,
             "ssl_verify_cert": True,
-            "ssl_verify_identity": False,
+            "ssl_verify_identity": True,
         }
 
     try:
@@ -118,7 +138,7 @@ def build_ssl_config() -> Dict[str, object]:
     return {
         "ssl_ca": ca_file.name,
         "ssl_verify_cert": True,
-        "ssl_verify_identity": False,
+        "ssl_verify_identity": True,
     }
 
 
@@ -259,13 +279,37 @@ class Database:
             Database: Self per method chaining
         """
         log("🔌 Connessione a MySQL…")
-        self._connection = mysql.connector.connect(
-            host=self.config.db_host,
-            user=self.config.db_user,
-            password=self.config.db_pass,
-            database=self.config.db_name,
-            **build_ssl_config()
-        )
+        try:
+            self._connection = mysql.connector.connect(
+                host=self.config.db_host,
+                user=self.config.db_user,
+                password=self.config.db_pass,
+                database=self.config.db_name,
+                **build_ssl_config()
+            )
+        except Exception as exc:
+            # Da quando questo consumer verifica anche l'IDENTITÀ dell'host
+            # (2026-08-18), i due controlli TLS falliscono con lo STESSO testo
+            # generico del driver: `certificate verify failed` non dice se ha
+            # ceduto la catena o l'identità (misurato dalla sessione SERVER
+            # contro la produzione con mysql-connector-python 9.6.0; su Node
+            # `mysql2` i due casi hanno invece codici distinti). Questo job
+            # gira di notte senza nessuno che guardi: il log è l'unica traccia
+            # che resta, quindi nomina le due cause e come separarle.
+            # L'eccezione NON cambia: chi chiama vede l'errore del driver.
+            if "certificate verify failed" in str(exc).lower():
+                log(
+                    f"   ↳ TLS: verifica rifiutata verso l'host {self.config.db_host!r}. "
+                    "Due cause possibili: (1) CATENA — DB_CA_CERT non è la CA che ha "
+                    "firmato il certificato del server (CA ruotata lato server, o env var "
+                    "con una CA diversa; un valore troncato verrebbe intercettato prima, "
+                    "in build_ssl_config); (2) IDENTITÀ — ssl_verify_identity=True e "
+                    "l'host qui sopra non è nel SAN del certificato (host cambiato, o "
+                    "certificato riemesso senza). Per distinguerle: ritentare la stessa "
+                    "connessione con ssl_verify_identity=False — se passa, la catena è "
+                    "sana e la causa è la (2)."
+                )
+            raise
         self._cursor = self._connection.cursor()
         return self
 
