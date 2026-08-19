@@ -57,3 +57,10 @@ deploy `dep-da2cekmgekts739tpseg` (commit `88396a1`, finished `20:58:44Z`), che 
 cancellato l'evidenza del sync verde delle `19:56:46Z` sopra. Dei `null` letti prima
 della corsa schedulata successiva **non** significano "non ha mai girato". La prova di
 una corsa va cercata qui o nei log di Render, non nell'endpoint.
+
+### Prima corsa schedulata col nuovo codice — verde
+
+`2026-08-19T01:03:33Z` (03:03 Rome), dai log di Render:
+`✅ Sync completato. ➕ 0 insert | ↺ 8392 update | Totale attuale: 8392`.
+Non un trigger manuale: è il ciclo normale del servizio, con
+`ssl_verify_identity=True` attivo e la CA verificata.
