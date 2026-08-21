@@ -25,7 +25,7 @@ def build_ssl_config() -> Dict[str, object]:
     """
     Costruisce i parametri TLS per mysql-connector-python verso `racoon`
     (Hetzner, mysqld 8.0.45) — rollout handoff-13
-    (../docs/tls-rollout-handoff13-2026-06-28.md), riga shopify-sync-ws.
+    (../_archive/tls-rollout-handoff13-2026-06-28.md), riga shopify-sync-ws.
 
     Dal 2026-08-16 il server presenta un certificato emesso dalla `Racoon
     Internal CA` propria (non più il self-signed auto-generato da MySQL),
@@ -80,7 +80,7 @@ def build_ssl_config() -> Dict[str, object]:
             "⚠️ DB_CA_CERT non impostata: connessione a racoon in TLS "
             "encrypt-only (nessuna verifica della CA). Impostare DB_CA_CERT "
             "su Render per la verifica completa della catena — vedi "
-            "docs/tls-rollout-handoff13-2026-06-28.md."
+            "_archive/tls-rollout-handoff13-2026-06-28.md."
         )
         return {
             "ssl_verify_cert": False,

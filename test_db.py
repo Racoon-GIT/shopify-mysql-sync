@@ -1,6 +1,6 @@
 """
 Test per la configurazione TLS della connessione MySQL (rollout handoff-13,
-passo shopify-sync-ws — IT/SVILUPPO/docs/tls-rollout-handoff13-2026-06-28.md).
+passo shopify-sync-ws — IT/SVILUPPO/_archive/tls-rollout-handoff13-2026-06-28.md).
 
 `build_ssl_config()` è una funzione pura sui parametri: nessun mock di
 mysql.connector necessario per quella parte (TestBuildSslConfig*). Il blocco
