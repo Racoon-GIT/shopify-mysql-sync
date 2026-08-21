@@ -9,9 +9,9 @@ Daily **Shopify → MySQL** sync via GraphQL. Feeds the `online_products` table 
 ## Trigger architecture
 
 - Render Web Service `shopify-sync-ws` (FREE, Frankfurt).
-- Triggered by Scheduler at **03:00 Rome** via `GET /api/trigger`, auth `Authorization: Bearer` (or `X-Trigger-Secret`); the `?secret=` query-string transport was removed 2026-08-03 after SERVER confirmed the job record was cleaned up.
-- `/api/trigger` returns **immediate `202`**, sync runs in a background thread (**~212s**, measured end-to-end by SERVER 2026-08-03; the long-standing "~60s" here was stale). It is a *background* thread, so gunicorn's `--timeout 120` does not apply to it — only to the request, which returns at once.
-- `/api/status` to check last execution status.
+- Triggered by Scheduler at **03:00 Rome** via `GET /api/trigger`, auth `Authorization: Bearer` (or `X-Trigger-Secret`); never query-string.
+- `/api/trigger` returns **immediate `202`**, sync runs in a background thread (**~212s**). It is a *background* thread, so gunicorn's `--timeout 120` does not apply to it — only to the request, which returns at once.
+- `/api/status` to check last execution status — in-memory: reset on every deploy/restart; proof of a run = Render logs.
 - KeepAlive from Scheduler `*/5 2-3 * * *` to wake the service before the sync.
 
 ## Always-on rules
