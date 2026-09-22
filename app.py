@@ -9,6 +9,9 @@ import threading
 import time
 from flask import Flask, jsonify, request
 
+from src import lag_check
+from src.config import Config
+
 app = Flask(__name__)
 
 TRIGGER_SECRET = os.getenv("TRIGGER_SECRET")
@@ -105,6 +108,54 @@ def trigger():
 @app.route("/api/status")
 def status():
     return jsonify(sync_status)
+
+
+def _parse_hours_param() -> int:
+    """Legge ?hours=, default DEFAULT_WINDOW_HOURS, clamp [MIN, MAX]. Valore
+    assente o non numerico -> default (mai un errore per un query param)."""
+    raw = request.args.get("hours")
+    if raw is None:
+        return lag_check.DEFAULT_WINDOW_HOURS
+    try:
+        hours = int(raw)
+    except (TypeError, ValueError):
+        return lag_check.DEFAULT_WINDOW_HOURS
+    return max(lag_check.MIN_WINDOW_HOURS, min(lag_check.MAX_WINDOW_HOURS, hours))
+
+
+@app.route("/api/lag-check", methods=["GET"])
+def lag_check_route():
+    """
+    Watchdog di sola lettura: Shopify vs mirror `online_products`
+    (docs/sync-lag-plan.md, option (d), gate-1 Ale 2026-09-22). Mai una
+    scrittura in nessun ramo. HTTP status resta sempre 200 (anche quando il
+    check non e' concludente): il verdetto vive nel body, perche' il consumer
+    e' una regola Scheduler `response_match` su `$.ok`. Il segreto non si
+    accetta mai in query string — stesso contratto di `/api/trigger`.
+    """
+    if not _is_authorized():
+        return jsonify({"error": "unauthorized"}), 401, {"WWW-Authenticate": "Bearer"}
+
+    hours = _parse_hours_param()
+
+    with _sync_lock:
+        running = sync_status["running"]
+
+    if running:
+        # Un sync in corso riscrive il mirror: confrontarlo ora produrrebbe
+        # solo falsi positivi. Non e' un errore, non si prova nemmeno.
+        return jsonify(lag_check.skipped_response(hours)), 200
+
+    try:
+        config = Config.from_env(require_product_ids=False)
+    except SystemExit:
+        # Config.from_env() fa sys.exit(1) su env var mancanti: SystemExit
+        # NON e' una Exception, va intercettata qui esplicitamente prima che
+        # risalga al worker WSGI.
+        return jsonify(lag_check.config_error_response(hours)), 200
+
+    result = lag_check.run_lag_check(config, window_hours=hours)
+    return jsonify(result), 200
 
 
 @app.route("/")

@@ -6,7 +6,8 @@ Supporta sia REST API che GraphQL Admin API.
 
 import time
 import json as json_module  # Evita shadowing con parametro 'json'
-from typing import Optional, Dict, Any, List, Generator
+from datetime import datetime, timezone
+from typing import Optional, Dict, Any, List, Generator, Tuple
 from collections import defaultdict
 
 import requests
@@ -80,6 +81,59 @@ class ShopifyClient:
                                 barcode
                                 price
                                 compareAtPrice
+                                inventoryItem {
+                                    id
+                                    legacyResourceId
+                                    inventoryLevels(first: 5) {
+                                        edges {
+                                            node {
+                                                location {
+                                                    name
+                                                }
+                                                quantities(names: ["available"]) {
+                                                    name
+                                                    quantity
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    """
+
+    # Query GraphQL leggera per il lag-check (sola lettura): niente immagini né
+    # metafield, ma createdAt/updatedAt di variante — assente dalla query di sync
+    # sopra perché il sync non ne ha mai avuto bisogno.
+    GRAPHQL_LAG_CHECK_QUERY = """
+    query GetRecentlyUpdatedProducts($cursor: String, $query: String) {
+        products(first: 10, after: $cursor, query: $query) {
+            pageInfo {
+                hasNextPage
+                endCursor
+            }
+            edges {
+                node {
+                    id
+                    legacyResourceId
+                    title
+                    status
+                    tags
+                    variants(first: 50) {
+                        edges {
+                            node {
+                                id
+                                legacyResourceId
+                                title
+                                sku
+                                price
+                                createdAt
+                                updatedAt
                                 inventoryItem {
                                     id
                                     legacyResourceId
@@ -444,6 +498,121 @@ class ShopifyClient:
             "image": featured_image,
             "variants": variants,
             "metafields": product_metafields
+        }
+
+    def get_recently_updated_products_graphql(
+        self,
+        since_utc: datetime,
+        location_name: str = "Magazzino",
+        max_pages: int = 20,
+    ) -> Tuple[List[Dict[str, Any]], bool]:
+        """
+        Prodotti ACTIVE aggiornati da `since_utc` in poi (sola lettura), per il
+        lag-check. `updated_at` e non `created_at` perché aggiungere una taglia
+        fuori griglia aggiorna un prodotto ESISTENTE — usare solo `created_at`
+        perderebbe esattamente questo caso.
+
+        Paginazione limitata a `max_pages`: se il tetto viene raggiunto con altre
+        pagine ancora disponibili, il risultato è INCOMPLETO e va trattato come
+        tale dal chiamante (mai una verità parziale spacciata per pulita).
+
+        Args:
+            since_utc: soglia inferiore (compresa) su `updated_at`, timezone-aware.
+            location_name: location per lo stock disponibile per variante.
+            max_pages: numero massimo di pagine da 10 prodotti da recuperare.
+
+        Returns:
+            Tuple[List[Dict], bool]: (prodotti normalizzati con varianti
+            createdAt/updatedAt/available, truncated). `truncated=True` se
+            `max_pages` è stato raggiunto con `hasNextPage` ancora vero.
+        """
+        since_str = since_utc.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        query_filter = f"status:active AND updated_at:>='{since_str}'"
+
+        cursor = None
+        page = 0
+        products: List[Dict[str, Any]] = []
+        truncated = False
+
+        while True:
+            page += 1
+            if page > max_pages:
+                truncated = True
+                break
+
+            variables = {"cursor": cursor, "query": query_filter}
+            log(f"📡 GraphQL lag-check: pagina {page}...")
+            data = self.graphql(self.GRAPHQL_LAG_CHECK_QUERY, variables)
+
+            products_data = data.get("products", {})
+            edges = products_data.get("edges", [])
+            page_info = products_data.get("pageInfo", {})
+
+            for edge in edges:
+                node = edge["node"]
+                products.append(self._normalize_lag_check_product(node, location_name))
+
+            if not page_info.get("hasNextPage"):
+                break
+            cursor = page_info.get("endCursor")
+
+        return products, truncated
+
+    def _normalize_lag_check_product(
+        self,
+        node: Dict[str, Any],
+        location_name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Normalizza un nodo prodotto della query lag-check (sottoinsieme di
+        `_normalize_graphql_product`: niente immagini/metafield, ma createdAt/
+        updatedAt di variante).
+
+        Args:
+            node: Nodo prodotto GraphQL.
+            location_name: Nome location per lo stock disponibile per variante.
+
+        Returns:
+            Dict: {id, title, status, tags, variants: [{id, title, sku, price,
+            created_at, updated_at, available}]}.
+        """
+        product_id = int(node["legacyResourceId"])
+
+        variants = []
+        for var_edge in node.get("variants", {}).get("edges", []):
+            var = var_edge["node"]
+            variant_id = int(var["legacyResourceId"])
+
+            inv_item = var.get("inventoryItem", {}) or {}
+
+            available = None
+            if location_name:
+                for level_edge in inv_item.get("inventoryLevels", {}).get("edges", []):
+                    level = level_edge["node"]
+                    loc = level.get("location", {})
+                    if loc.get("name", "").lower() == location_name.lower():
+                        for q in level.get("quantities", []):
+                            if q.get("name") == "available":
+                                available = q.get("quantity")
+                                break
+                        break
+
+            variants.append({
+                "id": variant_id,
+                "title": var.get("title", ""),
+                "sku": var.get("sku") or "",
+                "price": var.get("price", "0"),
+                "created_at": var.get("createdAt"),
+                "updated_at": var.get("updatedAt"),
+                "available": available,
+            })
+
+        return {
+            "id": product_id,
+            "title": node.get("title", ""),
+            "status": (node.get("status") or "").upper(),
+            "tags": node.get("tags", []) or [],
+            "variants": variants,
         }
 
     # --- Metodi di utilità ---

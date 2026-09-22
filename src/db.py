@@ -7,13 +7,35 @@ import base64
 import binascii
 import os
 import tempfile
-from typing import Optional, List, Tuple, Any, Set, Dict
+from datetime import datetime, timedelta, timezone
+from typing import Optional, List, Tuple, Any, Set, Dict, Iterable
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 import mysql.connector
 from mysql.connector import MySQLConnection
 from mysql.connector.cursor import MySQLCursor
 
 from .config import Config, log
+
+
+# Timezone di riferimento per lo schedule assunto del sync giornaliero
+# (lag-check, vedi Database.get_last_sync_run / _assumed_last_sync_utc).
+_ROME_TZ = ZoneInfo("Europe/Rome")
+
+
+def _assumed_last_sync_utc(now_utc: Optional[datetime] = None) -> datetime:
+    """
+    Schedule ASSUNTO del sync giornaliero: la 03:04 Europe/Rome più recente non
+    successiva a `now_utc` (03:00 di cron + ~4 minuti di durata media del run).
+    Fallback usato da `Database.get_last_sync_run()` quando `scheduler_job_logs`
+    non è leggibile o non ha righe per il job — mai un'eccezione, sempre un valore.
+    """
+    now_utc = now_utc or datetime.now(timezone.utc)
+    now_rome = now_utc.astimezone(_ROME_TZ)
+    candidate = now_rome.replace(hour=3, minute=4, second=0, microsecond=0)
+    if candidate > now_rome:
+        candidate -= timedelta(days=1)
+    return candidate.astimezone(timezone.utc)
 
 
 # Path del file temporaneo con la CA decodificata, riusato per tutto il processo
@@ -248,6 +270,12 @@ class Database:
         PRIMARY KEY (product_id, id)
     )
     """
+
+    # --- Costanti lag-check (sola lettura, vedi metodi a fine classe) ---
+    # Nome del job Scheduler da cercare in racoon.scheduler_jobs.
+    SCHEDULER_JOB_NAME = "Shopify-MySQL-Sync"
+    # Righe per statement in get_mirror_rows_by_variant_ids (un placeholder per id).
+    MIRROR_CHUNK_SIZE = 500
 
     # DDL per backup inventory (tabella temporanea)
     DDL_INVENTORY_BACKUP = """
@@ -669,3 +697,132 @@ class Database:
             WHERE variant_id = %s
         """, (variant_id,))
         return {row[0] for row in self.cursor.fetchall()}
+
+    # --- Metodi per lag-check (sola lettura — nessun INSERT/UPDATE/DELETE/DDL) ---
+
+    def get_mirror_count(self) -> int:
+        """
+        Conteggio righe in online_products. Sola lettura.
+
+        Returns:
+            int: numero di righe in online_products.
+        """
+        self.cursor.execute("SELECT COUNT(*) FROM online_products")
+        row = self.cursor.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+
+    def get_mirror_rows_by_variant_ids(
+        self, variant_ids: Iterable[int]
+    ) -> Dict[int, Dict[str, Any]]:
+        """
+        Righe mirror per un insieme di Variant_id, in chunk da `MIRROR_CHUNK_SIZE`
+        (un parametro per id) per restare sotto i limiti di placeholder del driver.
+        Sola lettura.
+
+        Args:
+            variant_ids: Variant_id Shopify da cercare nel mirror.
+
+        Returns:
+            Dict[int, Dict]: variant_id -> {sku, variant_title, price,
+            inventory_item_id}. Le varianti assenti dal mirror non compaiono.
+        """
+        ids = [int(v) for v in variant_ids]
+        result: Dict[int, Dict[str, Any]] = {}
+        for i in range(0, len(ids), self.MIRROR_CHUNK_SIZE):
+            chunk = ids[i:i + self.MIRROR_CHUNK_SIZE]
+            placeholders = ",".join(["%s"] * len(chunk))
+            self.cursor.execute(
+                f"""
+                SELECT Variant_id, SKU, Variant_Title, Price, Inventory_Item_ID
+                FROM online_products
+                WHERE Variant_id IN ({placeholders})
+                """,
+                tuple(chunk),
+            )
+            for variant_id, sku, variant_title, price, inventory_item_id in self.cursor.fetchall():
+                result[variant_id] = {
+                    "sku": sku,
+                    "variant_title": variant_title,
+                    "price": price,
+                    "inventory_item_id": inventory_item_id,
+                }
+        return result
+
+    def get_real_stock(self, sku: str, size: str) -> Optional[int]:
+        """
+        Stock reale per (sku lato ordine, taglia) — stessa espressione usata da
+        `SP_SHOP_ORDER_IN` (verificata live su racoon, 2026-09-22; vedi
+        `docs/sync-lag-plan.md` — non ridisegnare). `sku_root` ha PK composita
+        (SKU, SKU_ROOT): uno SKU lato ordine può mappare più SKU_ROOT, e la SUM
+        li somma tutti — corretto, non un bug. Tocca solo `stock` e `sku_root`,
+        sola lettura.
+
+        Args:
+            sku: SKU lato ordine (es. `online_products.SKU` / `log.SKU`).
+            size: Taglia (es. `online_products.Variant_Title` / `log.SIZE`).
+
+        Returns:
+            Optional[int]: quantità sommata, o None se la query fallisce per
+            qualunque motivo (grant mancante, tabella irraggiungibile, ecc.) —
+            mai un'eccezione, mai 0 come sostituto silenzioso di "sconosciuto".
+        """
+        try:
+            self.cursor.execute(
+                """
+                SELECT IFNULL(SUM(s.QTY), 0) AS Qty
+                FROM stock s
+                WHERE s.RAW_SHOE_SKU IN (
+                  SELECT SKU_ROOT FROM sku_root WHERE SKU = %s
+                )
+                AND s.SIZE = %s
+                """,
+                (sku, size),
+            )
+            row = self.cursor.fetchone()
+            if row is None or row[0] is None:
+                return None
+            return int(row[0])
+        except Exception as exc:
+            log(f"⚠️ get_real_stock({sku!r}, {size!r}) fallita: {exc}")
+            try:
+                self.connection.rollback()
+            except Exception:
+                pass
+            return None
+
+    def get_last_sync_run(self) -> Tuple[Optional[datetime], str]:
+        """
+        Ultima esecuzione REGISTRATA del job Scheduler 'Shopify-MySQL-Sync' —
+        racoon.scheduler_jobs + racoon.scheduler_job_logs, proprietà di
+        `Scheduler`, sola lettura qui. Non solleva mai: qualunque fallimento
+        (grant mancante, tabella/riga assente) ricade sullo schedule assunto
+        (03:04 Europe/Rome più recente non successiva a ora), sempre disponibile.
+
+        Returns:
+            Tuple[datetime | None, str]: (istante UTC, sorgente). Sorgente e'
+            "scheduler_job_logs" se osservata, "assumed_schedule" se calcolata.
+        """
+        try:
+            self.cursor.execute(
+                """
+                SELECT DATE_FORMAT(sjl.executed_at, '%%Y-%%m-%%d %%H:%%i:%%s') AS executed_at_str
+                FROM scheduler_job_logs sjl
+                JOIN scheduler_jobs sj ON sj.id = sjl.job_id
+                WHERE sj.name = %s
+                ORDER BY sjl.executed_at DESC
+                LIMIT 1
+                """,
+                (self.SCHEDULER_JOB_NAME,),
+            )
+            row = self.cursor.fetchone()
+            if row and row[0]:
+                dt = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                return dt, "scheduler_job_logs"
+        except Exception as exc:
+            log(f"⚠️ get_last_sync_run: lettura scheduler_job_logs fallita, uso schedule assunto: {exc}")
+            try:
+                self.connection.rollback()
+            except Exception:
+                pass
+
+        return _assumed_last_sync_utc(), "assumed_schedule"
