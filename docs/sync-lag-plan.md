@@ -69,9 +69,19 @@ DST-aware `Europe/Rome`, not a fixed CEST — reading it as +2 puts every winter
 
 ### 1.3 The classification rule
 
+The function below is the **idealised baseline**: it assumes the 03:00 Rome schedule fired every
+night. The classification was then **re-run against the runs actually logged** in
+`racoon.scheduler_job_logs` (§2 query set, job `Shopify-MySQL-Sync`), substituting each idealised
+`mirrored_at` with the first **observed** trigger strictly after the variant's `createdAt`.
+**Both passes return the same count — 4.** The only difference is occurrence #3, whose gap grows from
+15.7 h to 51.2 h because no run was logged on 07-15 or 07-16. **The `mirrored_at` column reported in
+§1.5 is the observed one**, which is why case 3 reads `07-17 03:04` and not `07-15 03:04`. The oracle
+is the scheduler's own log, not this function.
+
 ```python
 def mirrored_at_utc(created_utc):
-    """First 03:00 Europe/Rome sync STRICTLY AFTER the variant's createdAt, + 4 min runtime."""
+    """IDEALISED baseline: first 03:00 Europe/Rome sync STRICTLY AFTER createdAt, + 4 min runtime.
+    Re-run against observed scheduler_job_logs triggers; count unchanged, only #3's gap lengthens."""
     c_rome = created_utc.astimezone(ROME); day = c_rome.date()
     cand = datetime.combine(day, datetime.min.time(), tzinfo=ROME).replace(hour=3)
     if cand <= c_rome:
@@ -131,7 +141,7 @@ most likely archived *after* the order. **The tag-misconfiguration failure mode 
 
 **The four occurrences** (times Europe/Rome; `gap` = order → mirror, `age` = variant creation → order):
 
-| # | Order | Order_Name | SKU | Size | Variant id | `createdAt` | `mirrored_at` | gap (h) | age (h) | barcode |
+| # | Order | Order_Name | SKU | Size | Variant id | `createdAt` | `mirrored_at` *(observed)* | gap (h) | age (h) | barcode |
 |---|---|---|---|---|---|---|---|---|---|---|
 | 1 | 2026-06-17 11:25 | *(pre-cutover)* | `GL-R-CAMO-33TS-DIR` | 43 | 57830726369612 | 06-17 11:04 | 06-18 03:04 | 15.7 | **0.35** | `null` |
 | 2 | 2026-06-19 10:54 | *(pre-cutover)* | `GH-W-34PC-DIR` | 43 | 57847745216844 | 06-19 07:37 | 06-20 03:04 | 16.2 | 3.29 | `null` |
