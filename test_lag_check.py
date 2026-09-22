@@ -163,6 +163,7 @@ class FakeDB:
         raise_on_last_sync=None,
         raise_on_mirror_count=None,
         raise_on_mirror_rows=None,
+        raise_on_real_stock=None,
     ):
         self.last_sync = last_sync
         self.mirror_count = mirror_count
@@ -171,6 +172,8 @@ class FakeDB:
         self.raise_on_last_sync = raise_on_last_sync
         self.raise_on_mirror_count = raise_on_mirror_count
         self.raise_on_mirror_rows = raise_on_mirror_rows
+        self.raise_on_real_stock = raise_on_real_stock
+        self.real_stock_calls = []
         self.connected = False
         self.closed = False
 
@@ -198,6 +201,9 @@ class FakeDB:
         return {vid: row for vid, row in self.mirror_rows.items() if vid in ids}
 
     def get_real_stock(self, sku, size):
+        self.real_stock_calls.append((sku, size))
+        if self.raise_on_real_stock:
+            raise self.raise_on_real_stock
         return self.real_stock_map.get((sku, size))
 
 
@@ -239,6 +245,7 @@ class TestRunLagCheck:
         result = run_lag_check(_make_config(), db=db, shopify_client=client)
         assert result["status"] == "clean"
         assert result["ok"] is True
+        assert result["checked"] is True
         assert result["reason"] is None
 
     def test_db_unreachable_is_inconclusive_and_hides_exception_text(self):
@@ -248,6 +255,7 @@ class TestRunLagCheck:
         result = run_lag_check(_make_config(), db=db, shopify_client=client)
         assert result["status"] == "inconclusive"
         assert result["ok"] is False
+        assert result["checked"] is False
         assert result["reason"] == "db_unreachable"
         body_text = json.dumps(result)
         assert "ultra-secret-db-trace-12345" not in body_text
@@ -258,28 +266,45 @@ class TestRunLagCheck:
         result = run_lag_check(_make_config(), db=db, shopify_client=client)
         assert result["status"] == "inconclusive"
         assert result["ok"] is False
+        assert result["checked"] is False
         assert result["reason"] == "db_unreachable"
 
     def test_shopify_error_is_inconclusive(self):
-        """Caso 11: Shopify solleva -> inconclusive, ok:false."""
+        """Caso 11: Shopify solleva -> inconclusive, ok:false, checked:false."""
         db = FakeDB()
         client = FakeShopifyClient(raise_exc=Exception("shopify is down"))
         result = run_lag_check(_make_config(), db=db, shopify_client=client)
         assert result["status"] == "inconclusive"
         assert result["ok"] is False
+        assert result["checked"] is False
         assert result["reason"] == "shopify_error"
 
     def test_page_cap_reached_is_inconclusive(self):
-        """Caso 12: tetto pagine raggiunto -> inconclusive, ok:false, reason page_cap_reached."""
+        """Caso 12: tetto pagine raggiunto -> inconclusive, ok:false, checked:false, reason page_cap_reached."""
         db = FakeDB()
         client = FakeShopifyClient(products=[_product()], truncated=True)
         result = run_lag_check(_make_config(), db=db, shopify_client=client)
         assert result["status"] == "inconclusive"
         assert result["ok"] is False
+        assert result["checked"] is False
         assert result["reason"] == "page_cap_reached"
         # Un risultato incompleto non deve MAI arrivare travestito da pulito.
         assert result["lag"] == []
         assert result["drift"] == []
+
+    def test_unexpected_non_db_error_yields_internal_error(self):
+        """Fix collaterale: un'eccezione non-DB (es. un bug in classify() o
+        nell'arricchimento) NON deve finire sotto reason 'db_unreachable' —
+        indirizzerebbe un lettore al posto sbagliato. get_real_stock() e'
+        fuori dai try/except DB-specific: farla sollevare colpisce solo il
+        catch-all."""
+        db = FakeDB(raise_on_real_stock=Exception("bug altrove, non nel DB"))
+        client = FakeShopifyClient(products=[_product(created_at=LAST_SYNC + timedelta(hours=1))])
+        result = run_lag_check(_make_config(), db=db, shopify_client=client)
+        assert result["status"] == "inconclusive"
+        assert result["ok"] is False
+        assert result["checked"] is False
+        assert result["reason"] == "internal_error"
 
     def test_get_real_stock_failing_keeps_entry_with_null_stock_and_oversell(self):
         """Caso 14: get_real_stock fallisce -> real_stock/oversell null, entry comunque riportata."""
@@ -290,6 +315,10 @@ class TestRunLagCheck:
         entry = result["lag"][0]
         assert entry["real_stock"] is None
         assert entry["oversell"] is None
+        # Amendment 1: checked:true e ok:false devono poter convivere -- questa
+        # coppia e' quello che prova che i due flag sono indipendenti.
+        assert result["checked"] is True
+        assert result["ok"] is False
 
     def test_oversell_true_when_available_exceeds_real_stock(self):
         """Caso 15: available 2 vs real_stock 0 -> oversell true, oversell_count 1."""
@@ -348,11 +377,120 @@ class TestRunLagCheck:
         assert result["window_hours"] == expected
 
 
+def _bulk_lag_products(n, sku_prefix="SKU-BULK"):
+    """n prodotti distinti, ciascuno con una variante assente dal mirror e
+    creata dopo LAST_SYNC -> n entry 'lag' indipendenti."""
+    return [
+        _product(variant_id=9000 + i, sku=f"{sku_prefix}-{i}", created_at=LAST_SYNC + timedelta(hours=1))
+        for i in range(n)
+    ]
+
+
+class TestReportedEntriesCap:
+    """Amendment 3: MAX_REPORTED_ENTRIES limita l'arricchimento/serializzazione,
+    mai i conteggi veri."""
+
+    def test_over_cap_truncates_array_but_keeps_true_count(self):
+        db = FakeDB()
+        client = FakeShopifyClient(products=_bulk_lag_products(60))
+        result = run_lag_check(_make_config(), db=db, shopify_client=client)
+        assert result["lag_count"] == 60
+        assert len(result["lag"]) <= 50
+        assert result["entries_truncated"] is True
+        assert result["checked"] is True
+        assert result["ok"] is False
+
+    def test_exactly_cap_entries_not_truncated(self):
+        db = FakeDB()
+        client = FakeShopifyClient(products=_bulk_lag_products(50))
+        result = run_lag_check(_make_config(), db=db, shopify_client=client)
+        assert result["lag_count"] == 50
+        assert len(result["lag"]) == 50
+        assert result["entries_truncated"] is False
+
+    def test_enrichment_cap_bounds_get_real_stock_calls(self):
+        """Il cap non e' solo sull'array serializzato: get_real_stock() non va
+        chiamato oltre MAX_REPORTED_ENTRIES volte — altrimenti il difetto
+        (fino a 10.000 round-trip DB in una request) resta intatto anche con
+        l'array troncato a valle."""
+        db = FakeDB()
+        client = FakeShopifyClient(products=_bulk_lag_products(60))
+        run_lag_check(_make_config(), db=db, shopify_client=client)
+        assert len(db.real_stock_calls) <= 50
+
+
+def _clean_result():
+    db = FakeDB()
+    client = FakeShopifyClient(products=[])
+    return run_lag_check(_make_config(), db=db, shopify_client=client)
+
+
+def _lag_result():
+    db = FakeDB()
+    client = FakeShopifyClient(products=[_product(created_at=LAST_SYNC + timedelta(hours=1))])
+    return run_lag_check(_make_config(), db=db, shopify_client=client)
+
+
+def _drift_result():
+    db = FakeDB()
+    client = FakeShopifyClient(products=[_product(created_at=LAST_SYNC - timedelta(hours=1))])
+    return run_lag_check(_make_config(), db=db, shopify_client=client)
+
+
+def _lag_plus_drift_result():
+    p_lag = _product(variant_id=1001, sku="SKU-A", created_at=LAST_SYNC + timedelta(hours=1))
+    p_drift = _product(variant_id=1002, sku="SKU-B", created_at=LAST_SYNC - timedelta(hours=1))
+    db = FakeDB()
+    client = FakeShopifyClient(products=[p_lag, p_drift])
+    return run_lag_check(_make_config(), db=db, shopify_client=client)
+
+
+def _inconclusive_result():
+    db = FakeDB(raise_on_last_sync=Exception("down"))
+    client = FakeShopifyClient(products=[])
+    return run_lag_check(_make_config(), db=db, shopify_client=client)
+
+
+def _skipped_result():
+    return skipped_response(48)
+
+
+class TestOkCheckedInvariant:
+    """Amendment 2, test 4: `ok` e' vero se e solo se `checked` e' vero AND
+    `lag_count == 0` AND `drift_count == 0` — su OGNI status esistente,
+    table-driven apposta: un domani che aggiunga un settimo status senza
+    rispettare l'invariante fa fallire QUESTO test, non uno status-specifico
+    che nessuno penserebbe di aggiornare."""
+
+    @pytest.mark.parametrize(
+        "status, make_result",
+        [
+            ("clean", _clean_result),
+            ("lag", _lag_result),
+            ("drift", _drift_result),
+            ("lag+drift", _lag_plus_drift_result),
+            ("inconclusive", _inconclusive_result),
+            ("skipped", _skipped_result),
+        ],
+    )
+    def test_invariant_holds(self, status, make_result):
+        result = make_result()
+        assert result["status"] == status
+        assert result["ok"] == (
+            result["checked"] and result["lag_count"] == 0 and result["drift_count"] == 0
+        )
+
+
 class TestEnvelopeHelpers:
     def test_skipped_response_shape(self):
+        """Amendment 2, test 3: skipped -> ok:False, checked:False. Prima di
+        Amendment 2 'skipped' rispondeva ok:True; un watchdog che risponde
+        sempre 'skipped' leggerebbe GREEN a una regola Scheduler su
+        `$.ok == false` — skipped e' un non-verdetto come inconclusive."""
         resp = skipped_response(48)
         assert resp["status"] == "skipped"
-        assert resp["ok"] is True
+        assert resp["ok"] is False
+        assert resp["checked"] is False
         assert resp["lag"] == [] and resp["drift"] == []
         assert resp["reason"] is None
         json.dumps(resp)
@@ -361,6 +499,7 @@ class TestEnvelopeHelpers:
         resp = config_error_response(48)
         assert resp["status"] == "inconclusive"
         assert resp["ok"] is False
+        assert resp["checked"] is False
         assert resp["reason"] == "config_error"
         json.dumps(resp)
 

@@ -40,6 +40,17 @@ MIN_WINDOW_HOURS = 1
 MAX_WINDOW_HOURS = 168
 DEFAULT_MAX_PAGES = 20
 
+# Tetto sul numero di entry (lag + drift, combinate) arricchite con
+# get_real_stock() e serializzate nel body. lag_count/drift_count restano i
+# totali VERI (l'allarme); gli array "lag"/"drift" sono il campione (il
+# dettaglio) — oltre il cap una entry viene interrogata sul DB e riportata,
+# le altre no. Amendment 3, 2026-09-22: senza questo cap un drift storm
+# (mirror lookup vuoto/quasi vuoto) puo' generare fino a 10.000 entry, cioe'
+# fino a 10.000 round-trip DB dentro un'unica richiesta HTTP che il worker
+# gunicorn (--timeout 120) uccide prima che risponda — a differenza di
+# /api/trigger, /api/lag-check lavora dentro la request, non su un thread.
+MAX_REPORTED_ENTRIES = 50
+
 
 # --- Helper puri ---
 
@@ -195,8 +206,11 @@ def _flatten_products(products: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def _inconclusive(base: Dict[str, Any], reason: str) -> Dict[str, Any]:
     """Busta di risposta per un check che non e' potuto arrivare a un verdetto."""
+    # INVARIANTE: ok e' vero se e solo se checked e' vero AND lag_count == 0
+    # AND drift_count == 0.
     return {
         "ok": False,
+        "checked": False,
         "status": "inconclusive",
         **base,
         "last_sync_utc": None,
@@ -209,6 +223,7 @@ def _inconclusive(base: Dict[str, Any], reason: str) -> Dict[str, Any]:
         "drift": [],
         "drift_count": 0,
         "oversell_count": 0,
+        "entries_truncated": False,
         "reason": reason,
     }
 
@@ -219,10 +234,19 @@ def _clamp_window_hours(window_hours: int) -> int:
 
 def skipped_response(window_hours: int, now_utc: Optional[datetime] = None) -> Dict[str, Any]:
     """
-    Busta di risposta per "un sync e' in corso": non e' un errore, e' un check
-    che scientemente non si prova a fare mentre il mirror viene riscritto —
-    confrontare contro una tabella a metà scrittura produrrebbe falsi positivi.
-    Il chiamante (`app.py`) la usa PRIMA di invocare `run_lag_check()`.
+    Busta di risposta per "un sync e' in corso": non e' un errore di per se',
+    e' un check che scientemente non si prova a fare mentre il mirror viene
+    riscritto — confrontare contro una tabella a metà scrittura produrrebbe
+    falsi positivi. Il chiamante (`app.py`) la usa PRIMA di invocare
+    `run_lag_check()`.
+
+    `ok: False` (Amendment 2, 2026-09-22): "skipped" e' un non-verdetto, esattamente
+    come "inconclusive" — il check non e' arrivato a un confronto. `ok: True`
+    qui farebbe leggere GREEN a una regola Scheduler wired su `$.ok == false`
+    se il watchdog rispondesse sempre "skipped" per qualsiasi motivo, rendendo
+    la proprieta' di sicurezza dipendente da una seconda regola Scheduler
+    configurata correttamente altrove — stato esterno che questo repo non puo'
+    verificare.
     """
     now = now_utc or datetime.now(timezone.utc)
     base = {
@@ -230,8 +254,11 @@ def skipped_response(window_hours: int, now_utc: Optional[datetime] = None) -> D
         "checked_at_rome": now.astimezone(ROME_TZ).strftime("%Y-%m-%d %H:%M:%S"),
         "window_hours": _clamp_window_hours(window_hours),
     }
+    # INVARIANTE: ok e' vero se e solo se checked e' vero AND lag_count == 0
+    # AND drift_count == 0.
     return {
-        "ok": True,
+        "ok": False,
+        "checked": False,
         "status": "skipped",
         **base,
         "last_sync_utc": None,
@@ -244,6 +271,7 @@ def skipped_response(window_hours: int, now_utc: Optional[datetime] = None) -> D
         "drift": [],
         "drift_count": 0,
         "oversell_count": 0,
+        "entries_truncated": False,
         "reason": None,
     }
 
@@ -293,11 +321,11 @@ def run_lag_check(
             `Database(config)`, connesso e chiuso qui.
 
     Returns:
-        Dict: busta di risposta JSON-serializzabile (vedi CLAUDE.md del task
-        per la forma esatta). `ok` e' True solo per status "clean" o "skipped"
-        — quest'ultimo non e' gestito qui, e' responsabilità del chiamante
-        (app.py) restituirlo PRIMA di invocare questo orchestratore, quando un
-        sync e' in corso.
+        Dict: busta di risposta JSON-serializzabile. `checked` e' sempre True
+        qui (il confronto e' arrivato in fondo): `ok` e' True solo per status
+        "clean". Lo status "skipped" non e' gestito qui, e' responsabilità del
+        chiamante (app.py), che lo restituisce PRIMA di invocare questo
+        orchestratore quando un sync e' in corso.
     """
     now = now_utc or datetime.now(timezone.utc)
     window_hours = _clamp_window_hours(window_hours)
@@ -347,7 +375,22 @@ def run_lag_check(
 
         result = classify(flat_variants, mirror_by_variant_id, last_sync_utc)
 
-        for entry in result["lag"] + result["drift"]:
+        # lag_count/drift_count sono i totali VERI (l'allarme), calcolati
+        # PRIMA del cap — non vanno mai confusi con la lunghezza degli array
+        # riportati (il campione), che il cap tronca sotto.
+        lag_count = len(result["lag"])
+        drift_count = len(result["drift"])
+        total_entries = lag_count + drift_count
+        entries_truncated = total_entries > MAX_REPORTED_ENTRIES
+
+        # Amendment 3: arricchisci (get_real_stock) e riporta al massimo
+        # MAX_REPORTED_ENTRIES entry in totale su lag+drift combinate, "lag"
+        # prima di "drift" (stesso ordine dello status). Oltre il cap la
+        # entry resta classificata (e contata) ma non viene interrogata sul
+        # DB ne' serializzata — il verdetto (status/ok/lag_count/drift_count)
+        # resta esatto, solo il dettaglio e' campionato.
+        enriched = (result["lag"] + result["drift"])[:MAX_REPORTED_ENTRIES]
+        for entry in enriched:
             real_stock = database.get_real_stock(entry["sku"], entry["size"])
             entry["real_stock"] = real_stock
             available = entry.get("shopify_available")
@@ -356,11 +399,15 @@ def run_lag_check(
             else:
                 entry["oversell"] = None
 
-        lag_count = len(result["lag"])
-        drift_count = len(result["drift"])
-        oversell_count = sum(
-            1 for e in (result["lag"] + result["drift"]) if e.get("oversell") is True
-        )
+        reported_lag = result["lag"][:MAX_REPORTED_ENTRIES]
+        reported_drift = result["drift"][: max(0, MAX_REPORTED_ENTRIES - lag_count)]
+
+        # oversell_count e' calcolato SOLO sul campione arricchito (al massimo
+        # MAX_REPORTED_ENTRIES entry), NON sul totale lag_count+drift_count:
+        # oltre il cap una entry non viene mai interrogata su get_real_stock,
+        # quindi non puo' contribuire a oversell_count. Non leggerlo come un
+        # totale.
+        oversell_count = sum(1 for e in enriched if e.get("oversell") is True)
 
         if lag_count and drift_count:
             status = "lag+drift"
@@ -371,8 +418,16 @@ def run_lag_check(
         else:
             status = "clean"
 
+        checked = True
+        # INVARIANTE: ok e' vero se e solo se checked e' vero AND lag_count ==
+        # 0 AND drift_count == 0. La troncatura del dettaglio (entries_truncated)
+        # non la tocca: il verdetto resta valido anche quando il campione e'
+        # parziale.
+        ok = checked and lag_count == 0 and drift_count == 0
+
         return {
-            "ok": status == "clean",
+            "ok": ok,
+            "checked": checked,
             "status": status,
             **base,
             "last_sync_utc": _isoformat_utc(last_sync_utc),
@@ -380,18 +435,23 @@ def run_lag_check(
             "mirror_rows": mirror_rows_count,
             "shopify_products_checked": len(products),
             "shopify_variants_checked": len(flat_variants),
-            "lag": result["lag"],
+            "lag": reported_lag,
             "lag_count": lag_count,
-            "drift": result["drift"],
+            "drift": reported_drift,
             "drift_count": drift_count,
             "oversell_count": oversell_count,
+            "entries_truncated": entries_truncated,
             "reason": None,
         }
     except Exception as exc:
-        # Rete anywhere else non prevista, o l'apertura della connessione
-        # stessa: mai far trapelare l'eccezione, mai un traceback nel body.
+        # Qualunque altro errore non previsto (es. un bug in classify() o
+        # altrove, non una eccezione DB) — mai far trapelare l'eccezione, mai
+        # un traceback nel body. reason "internal_error" e non
+        # "db_unreachable": i due handler DB-specific sopra hanno gia'
+        # intercettato i casi in cui e' davvero il DB a essere irraggiungibile,
+        # e un lettore non va indirizzato al posto sbagliato.
         log(f"⚠️ lag-check: errore inatteso: {exc}")
-        return _inconclusive(base, reason="db_unreachable")
+        return _inconclusive(base, reason="internal_error")
     finally:
         if owns_db:
             try:

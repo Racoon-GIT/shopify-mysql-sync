@@ -216,7 +216,9 @@ class TestLagCheckSkipped:
         assert response.status_code == 200
         data = response.json
         assert data["status"] == "skipped"
-        assert data["ok"] is True
+        # Amendment 2: skipped e' un non-verdetto, non un GREEN.
+        assert data["ok"] is False
+        assert data["checked"] is False
         mock_run.assert_not_called()
 
 
@@ -234,6 +236,7 @@ class TestLagCheckConfigError:
         data = response.json
         assert data["status"] == "inconclusive"
         assert data["ok"] is False
+        assert data["checked"] is False
         assert data["reason"] == "config_error"
 
 
