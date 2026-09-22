@@ -276,6 +276,8 @@ class Database:
     SCHEDULER_JOB_NAME = "Shopify-MySQL-Sync"
     # Righe per statement in get_mirror_rows_by_variant_ids (un placeholder per id).
     MIRROR_CHUNK_SIZE = 500
+    # SKU distinti per statement in get_real_stock_bulk (vedi metodo).
+    STOCK_CHUNK_SIZE = 500
 
     # DDL per backup inventory (tabella temporanea)
     DDL_INVENTORY_BACKUP = """
@@ -748,47 +750,130 @@ class Database:
                 }
         return result
 
+    def get_real_stock_bulk(
+        self, pairs: Iterable[Tuple[str, str]]
+    ) -> Dict[Tuple[str, str], Optional[int]]:
+        """
+        Stock reale per un insieme di (sku lato ordine, taglia), in chunk da
+        `STOCK_CHUNK_SIZE` sku DISTINTI per statement — stesso dato di
+        `get_real_stock`/`SP_SHOP_ORDER_IN`, ma batched per evitare un round-trip
+        DB per entry (Amendment, 2026-09-22: `oversell_count` deve essere un
+        totale vero, non solo sul campione arricchibile a costo di N round-trip).
+
+        Query per chunk (due liste IN separate, non un confronto row-value su
+        `(sr.SKU, s.SIZE)`: un row-value comparison su due tabelle non usa
+        indice; le due IN sì, al prezzo di un piccolo over-fetch — il prodotto
+        cartesiano degli sku e delle taglie del chunk — filtrato qui in Python
+        alle sole coppie realmente richieste. `racoon.stock` ha 2.454 righe:
+        l'over-fetch non costa nulla):
+
+            SELECT sr.SKU AS sku, s.SIZE AS size, IFNULL(SUM(s.QTY), 0) AS qty
+            FROM stock s
+            JOIN sku_root sr ON s.RAW_SHOE_SKU = sr.SKU_ROOT
+            WHERE sr.SKU IN (...) AND s.SIZE IN (...)
+            GROUP BY sr.SKU, s.SIZE
+
+        Contratto per coppia richiesta — tre esiti distinti, ATTENTI a non
+        confonderli:
+          - coppia con righe stock: l'int sommato.
+          - coppia richiesta, chunk RIUSCITO, nessuna riga tornata: 0 — nessuna
+            riga di stock e' un FATTO, non uno sconosciuto.
+          - coppia il cui chunk ha SOLLEVATO: None — sconosciuto, non
+            interrogabile.
+
+        La ragione della riga di mezzo: la query per-entry `get_real_stock`
+        (senza GROUP BY) e' un aggregato nudo che torna SEMPRE esattamente una
+        riga, quindi una coppia senza righe di stock torna gia' 0. Con GROUP BY
+        una coppia senza righe e' semplicemente ASSENTE dal result set: se il
+        chiamante legge "assente" come "sconosciuto", un oversell vero (stock
+        realmente zero) diventerebbe null invece di true — l'unica direzione
+        di errore che questo watchdog non puo' permettersi. Per questo i 0
+        vengono seminati SOLO dopo che il chunk e' riuscito, MAI prima del
+        loop globalmente: seminare tutto a 0 in anticipo farebbe si' che un
+        chunk che solleva lasci le sue coppie a 0 — "non ho potuto controllare"
+        diventerebbe silenziosamente "nessuno stock", con falsi oversell.
+
+        Args:
+            pairs: coppie (sku lato ordine, taglia) da interrogare.
+
+        Returns:
+            Dict[(sku, size), int | None]: una chiave per OGNI coppia
+            richiesta (deduplicata), mai un'eccezione.
+        """
+        result: Dict[Tuple[str, str], Optional[int]] = {}
+
+        sizes_by_sku: Dict[str, Set[str]] = {}
+        skus_order: List[str] = []
+        for sku, size in pairs:
+            if sku not in sizes_by_sku:
+                sizes_by_sku[sku] = set()
+                skus_order.append(sku)
+            sizes_by_sku[sku].add(size)
+
+        for i in range(0, len(skus_order), self.STOCK_CHUNK_SIZE):
+            chunk_skus = skus_order[i:i + self.STOCK_CHUNK_SIZE]
+            chunk_pairs = [
+                (sku, size) for sku in chunk_skus for size in sizes_by_sku[sku]
+            ]
+            chunk_sizes = sorted({size for _, size in chunk_pairs})
+
+            try:
+                sku_placeholders = ",".join(["%s"] * len(chunk_skus))
+                size_placeholders = ",".join(["%s"] * len(chunk_sizes))
+                self.cursor.execute(
+                    f"""
+                    SELECT sr.SKU AS sku, s.SIZE AS size, IFNULL(SUM(s.QTY), 0) AS qty
+                    FROM stock s
+                    JOIN sku_root sr ON s.RAW_SHOE_SKU = sr.SKU_ROOT
+                    WHERE sr.SKU IN ({sku_placeholders}) AND s.SIZE IN ({size_placeholders})
+                    GROUP BY sr.SKU, s.SIZE
+                    """,
+                    tuple(chunk_skus) + tuple(chunk_sizes),
+                )
+                rows = self.cursor.fetchall()
+            except Exception as exc:
+                log(f"⚠️ get_real_stock_bulk: chunk di {len(chunk_skus)} sku fallito: {exc}")
+                try:
+                    self.connection.rollback()
+                except Exception:
+                    pass
+                for pair in chunk_pairs:
+                    result[pair] = None
+                continue
+
+            # Chunk riuscito: semina 0 per ogni coppia richiesta di QUESTO
+            # chunk (assenza di riga = fatto), poi sovrascrivi con le righe
+            # tornate — che possono includere combinazioni sku/size del
+            # prodotto cartesiano non richieste: ignorate perche' non hanno
+            # una chiave gia' seminata in `result`.
+            for pair in chunk_pairs:
+                result[pair] = 0
+            for row_sku, row_size, qty in rows:
+                pair = (row_sku, row_size)
+                if pair in result:
+                    result[pair] = int(qty)
+
+        return result
+
     def get_real_stock(self, sku: str, size: str) -> Optional[int]:
         """
-        Stock reale per (sku lato ordine, taglia) — stessa espressione usata da
-        `SP_SHOP_ORDER_IN` (verificata live su racoon, 2026-09-22; vedi
-        `docs/sync-lag-plan.md` — non ridisegnare). `sku_root` ha PK composita
-        (SKU, SKU_ROOT): uno SKU lato ordine può mappare più SKU_ROOT, e la SUM
-        li somma tutti — corretto, non un bug. Tocca solo `stock` e `sku_root`,
-        sola lettura.
+        Stock reale per (sku lato ordine, taglia) — wrapper sottile su
+        `get_real_stock_bulk` per una sola coppia: stessa implementazione,
+        stesso contratto di prima (mai un'eccezione, mai 0 come sostituto
+        silenzioso di "sconosciuto"): None se la coppia non e' interrogabile
+        (il chunk ha sollevato), 0 se e' interrogabile ma senza righe di
+        stock, altrimenti la somma.
 
         Args:
             sku: SKU lato ordine (es. `online_products.SKU` / `log.SKU`).
             size: Taglia (es. `online_products.Variant_Title` / `log.SIZE`).
 
         Returns:
-            Optional[int]: quantità sommata, o None se la query fallisce per
-            qualunque motivo (grant mancante, tabella irraggiungibile, ecc.) —
-            mai un'eccezione, mai 0 come sostituto silenzioso di "sconosciuto".
+            Optional[int]: quantità sommata, 0 se nessuna riga, None se la
+            query fallisce per qualunque motivo (grant mancante, tabella
+            irraggiungibile, ecc.).
         """
-        try:
-            self.cursor.execute(
-                """
-                SELECT IFNULL(SUM(s.QTY), 0) AS Qty
-                FROM stock s
-                WHERE s.RAW_SHOE_SKU IN (
-                  SELECT SKU_ROOT FROM sku_root WHERE SKU = %s
-                )
-                AND s.SIZE = %s
-                """,
-                (sku, size),
-            )
-            row = self.cursor.fetchone()
-            if row is None or row[0] is None:
-                return None
-            return int(row[0])
-        except Exception as exc:
-            log(f"⚠️ get_real_stock({sku!r}, {size!r}) fallita: {exc}")
-            try:
-                self.connection.rollback()
-            except Exception:
-                pass
-            return None
+        return self.get_real_stock_bulk([(sku, size)]).get((sku, size))
 
     def get_last_sync_run(self) -> Tuple[Optional[datetime], str]:
         """

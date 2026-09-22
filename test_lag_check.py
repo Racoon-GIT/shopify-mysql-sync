@@ -7,6 +7,7 @@ test_sync.py / test_app.py / test_db.py.
 """
 
 import json
+import math
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import MagicMock
@@ -154,6 +155,19 @@ class FakeShopifyClient:
 
 
 class FakeDB:
+    """
+    `real_stock_map` mima il contratto di `get_real_stock_bulk` (Amendment 4):
+    una coppia ASSENTE dalla mappa e' 0 (nessuna riga, un fatto — default
+    volutamente pericoloso da sbagliare, vedi contratto in `src/db.py`), una
+    coppia mappata esplicitamente a `None` rappresenta un chunk fallito per
+    QUELLA coppia (gestito con garbo, non solleva). `raise_on_real_stock`
+    resta un'altra cosa: fa sollevare l'intera chiamata (non gestito da
+    nessun try/except DB-specific in `run_lag_check`), per il test che prova
+    il catch-all — la Database reale non si comporta cosi' (il suo
+    get_real_stock_bulk non solleva mai), e' un doppio deliberatamente
+    "cattivo" per quel solo scenario.
+    """
+
     def __init__(
         self,
         last_sync=(LAST_SYNC, "scheduler_job_logs"),
@@ -174,6 +188,7 @@ class FakeDB:
         self.raise_on_mirror_rows = raise_on_mirror_rows
         self.raise_on_real_stock = raise_on_real_stock
         self.real_stock_calls = []
+        self.real_stock_bulk_calls = []
         self.connected = False
         self.closed = False
 
@@ -201,10 +216,20 @@ class FakeDB:
         return {vid: row for vid, row in self.mirror_rows.items() if vid in ids}
 
     def get_real_stock(self, sku, size):
+        """Non piu' chiamato da run_lag_check (Amendment 4) — resta solo per
+        completezza dell'interfaccia e per i test che asserisco NON venga
+        invocato (niente N+1)."""
         self.real_stock_calls.append((sku, size))
         if self.raise_on_real_stock:
             raise self.raise_on_real_stock
         return self.real_stock_map.get((sku, size))
+
+    def get_real_stock_bulk(self, pairs):
+        pairs = list(pairs)
+        self.real_stock_bulk_calls.append(pairs)
+        if self.raise_on_real_stock:
+            raise self.raise_on_real_stock
+        return {pair: self.real_stock_map.get(pair, 0) for pair in pairs}
 
 
 def _product(
@@ -306,9 +331,13 @@ class TestRunLagCheck:
         assert result["checked"] is False
         assert result["reason"] == "internal_error"
 
-    def test_get_real_stock_failing_keeps_entry_with_null_stock_and_oversell(self):
-        """Caso 14: get_real_stock fallisce -> real_stock/oversell null, entry comunque riportata."""
-        db = FakeDB(real_stock_map={})  # nessuna chiave -> None per qualunque (sku, size)
+    def test_get_real_stock_bulk_pair_failure_keeps_entry_with_null_stock_and_oversell(self):
+        """Caso 14 (Amendment 4): la coppia e' esplicitamente None nella mappa
+        (il suo chunk e' fallito, gestito con garbo da get_real_stock_bulk,
+        senza sollevare) -> real_stock/oversell null, entry comunque
+        riportata. NON piu' simulato con una mappa vuota: dall'amendment una
+        coppia ASSENTE dalla mappa e' 0 (nessuna riga, un fatto), non None."""
+        db = FakeDB(real_stock_map={("SKU-BASE-DIR", "43"): None})
         client = FakeShopifyClient(products=[_product()])
         result = run_lag_check(_make_config(), db=db, shopify_client=client)
         assert result["lag_count"] == 1
@@ -328,6 +357,19 @@ class TestRunLagCheck:
         assert result["oversell_count"] == 1
         assert result["lag"][0]["oversell"] is True
         assert result["lag"][0]["real_stock"] == 0
+
+    def test_oversell_true_when_pair_absent_from_real_stock_map_defaults_to_zero(self):
+        """Amendment 4, test 3 (direzione pericolosa): la coppia NON compare
+        nella mappa (nessuna riga di stock, non un fallimento) -> 0, non None
+        — available 2 > 0 produce oversell True. E' la direzione che
+        l'amendment non puo' sbagliare: un oversell vero non deve leggere
+        come sconosciuto."""
+        db = FakeDB(real_stock_map={})
+        client = FakeShopifyClient(products=[_product(available=2)])
+        result = run_lag_check(_make_config(), db=db, shopify_client=client)
+        assert result["lag"][0]["real_stock"] == 0
+        assert result["lag"][0]["oversell"] is True
+        assert result["oversell_count"] == 1
 
     def test_real_stock_int_survives_json_serialisation(self):
         """Caso 13 (end-to-end): real_stock intero arriva pulito fino al body serializzabile."""
@@ -408,15 +450,52 @@ class TestReportedEntriesCap:
         assert len(result["lag"]) == 50
         assert result["entries_truncated"] is False
 
-    def test_enrichment_cap_bounds_get_real_stock_calls(self):
-        """Il cap non e' solo sull'array serializzato: get_real_stock() non va
-        chiamato oltre MAX_REPORTED_ENTRIES volte — altrimenti il difetto
-        (fino a 10.000 round-trip DB in una request) resta intatto anche con
-        l'array troncato a valle."""
+    def test_oversell_count_is_true_total_under_truncation(self):
+        """Amendment 4, test 5: oversell_count resta un totale VERO anche
+        quando gli array lag/drift sono troncati a 50 — 60 entry, 55 in
+        oversell (default 'nessuna riga -> 0' per 55 sku, i 5 rimanenti hanno
+        stock sufficiente a non essere oversell)."""
+        n = 60
+        not_oversell_from = 55
+        products = _bulk_lag_products(n)
+        real_stock_map = {
+            (f"SKU-BULK-{i}", "43"): 100 for i in range(not_oversell_from, n)
+        }
+        db = FakeDB(real_stock_map=real_stock_map)
+        client = FakeShopifyClient(products=products)
+        result = run_lag_check(_make_config(), db=db, shopify_client=client)
+        assert result["lag_count"] == n
+        assert result["oversell_count"] == not_oversell_from
+        assert len(result["lag"]) + len(result["drift"]) <= 50
+        assert result["entries_truncated"] is True
+
+    def test_enrichment_is_not_capped_only_serialisation_is(self):
+        """Amendment 4: il cap NON limita piu' l'arricchimento — tutte le 60
+        entry ricevono real_stock/oversell, solo gli array lag/drift
+        restano tagliati a MAX_REPORTED_ENTRIES."""
+        db = FakeDB()
+        client = FakeShopifyClient(products=_bulk_lag_products(60))
+        result = run_lag_check(_make_config(), db=db, shopify_client=client)
+        assert result["lag_count"] == 60
+        assert len(result["lag"]) <= 50
+        # Le entry FUORI dal campione serializzato non esistono nel body, ma
+        # il conteggio oversell a valle (vedi TestReportedEntriesCap) prova
+        # che sono state comunque arricchite.
+        assert all("real_stock" in e for e in result["lag"])
+
+    def test_no_n_plus_1_get_real_stock_bulk_called_once_not_per_entry(self):
+        """Amendment 4, test 6: niente N+1 — get_real_stock_bulk() e' chiamato
+        al massimo ceil(sku distinti / 500) volte (qui: 1, sotto lo stesso
+        chunk lato run_lag_check), MAI una volta per entry; get_real_stock()
+        (per-entry) non viene mai invocato. Asserzione sul CONTEGGIO delle
+        chiamate al fake, non sull'output."""
         db = FakeDB()
         client = FakeShopifyClient(products=_bulk_lag_products(60))
         run_lag_check(_make_config(), db=db, shopify_client=client)
-        assert len(db.real_stock_calls) <= 50
+        distinct_skus = 60  # _bulk_lag_products usa uno sku distinto per prodotto
+        assert len(db.real_stock_bulk_calls) <= math.ceil(distinct_skus / 500)
+        assert len(db.real_stock_calls) == 0
+        assert len(db.real_stock_calls) != 60
 
 
 def _clean_result():
@@ -549,9 +628,10 @@ class TestDatabaseLagCheckMethods:
         cursor.execute.assert_not_called()
 
     def test_get_real_stock_casts_decimal_to_int(self):
-        """Caso 13 (lato DB): SUM() torna Decimal, get_real_stock casta a int."""
+        """Caso 13 (lato DB): SUM() torna Decimal, get_real_stock (wrapper su
+        get_real_stock_bulk) casta a int."""
         cursor = MagicMock()
-        cursor.fetchone.return_value = (Decimal("9"),)
+        cursor.fetchall.return_value = [("SKU-BASE-DIR", "43", Decimal("9"))]
         db = self._db_with_cursor(cursor)
         result = db.get_real_stock("SKU-BASE-DIR", "43")
         assert result == 9
@@ -559,7 +639,7 @@ class TestDatabaseLagCheckMethods:
 
     def test_get_real_stock_query_shape_and_params(self):
         cursor = MagicMock()
-        cursor.fetchone.return_value = (Decimal("0"),)
+        cursor.fetchall.return_value = []
         db = self._db_with_cursor(cursor)
         db.get_real_stock("SKU-BASE-DIR", "43")
         args, _ = cursor.execute.call_args
@@ -568,6 +648,7 @@ class TestDatabaseLagCheckMethods:
         assert "IFNULL(SUM(s.QTY), 0)" in query
         assert "sku_root" in query
         assert "RAW_SHOE_SKU" in query
+        assert "GROUP BY" in query
 
     def test_get_real_stock_returns_none_on_failure_not_zero_not_raise(self):
         cursor = MagicMock()
@@ -575,6 +656,61 @@ class TestDatabaseLagCheckMethods:
         db = self._db_with_cursor(cursor)
         result = db.get_real_stock("SKU-BASE-DIR", "43")
         assert result is None
+
+    def test_get_real_stock_bulk_pair_absent_from_result_set_is_zero(self):
+        """Amendment 4, test 1: nessuna riga affatto per la coppia (chunk
+        riuscito, GROUP BY non produce righe per lei) -> 0, non None. E' la
+        riga pericolosa del contratto: assenza = fatto, non sconosciuto."""
+        cursor = MagicMock()
+        cursor.fetchall.return_value = []
+        db = self._db_with_cursor(cursor)
+        result = db.get_real_stock_bulk([("SKU-X", "40")])
+        assert result == {("SKU-X", "40"): 0}
+
+    def test_get_real_stock_bulk_pair_summing_to_zero_is_zero(self):
+        """Amendment 4, test 2: riga presente ma SUM(QTY) e' 0 -> stesso 0,
+        percorso diverso (riga con qty=0 invece di nessuna riga), stesso
+        numero — entrambi devono atterrare li'."""
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [("SKU-X", "40", Decimal("0"))]
+        db = self._db_with_cursor(cursor)
+        result = db.get_real_stock_bulk([("SKU-X", "40")])
+        assert result == {("SKU-X", "40"): 0}
+
+    def test_get_real_stock_bulk_casts_decimal_qty_to_int(self):
+        """Amendment 4, test 7: Decimal('9') dal driver -> int 9 serializzabile."""
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [("SKU-X", "40", Decimal("9"))]
+        db = self._db_with_cursor(cursor)
+        result = db.get_real_stock_bulk([("SKU-X", "40")])
+        assert result[("SKU-X", "40")] == 9
+        assert isinstance(result[("SKU-X", "40")], int)
+        json.dumps(result[("SKU-X", "40")])
+
+    def test_get_real_stock_bulk_chunk_isolation_first_succeeds_second_raises(self):
+        """Amendment 4, test 4: primo chunk riesce, secondo solleva -> le
+        coppie del primo chunk sono numeri (anche quella senza riga: 0, un
+        fatto), OGNI coppia del secondo chunk e' None (non 0) — la fixture
+        che prova che la seminatura degli 0 avviene PER CHUNK, dopo il suo
+        successo, mai globalmente prima del loop."""
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [("SKU-A", "40", Decimal("3"))]
+        cursor.execute.side_effect = [None, Exception("chunk 2 irraggiungibile")]
+        db = self._db_with_cursor(cursor)
+        db.STOCK_CHUNK_SIZE = 2  # forza 2 chunk con solo 4 sku distinti
+        pairs = [("SKU-A", "40"), ("SKU-B", "41"), ("SKU-C", "42"), ("SKU-D", "43")]
+        result = db.get_real_stock_bulk(pairs)
+        assert result[("SKU-A", "40")] == 3
+        assert result[("SKU-B", "41")] == 0
+        assert result[("SKU-C", "42")] is None
+        assert result[("SKU-D", "43")] is None
+
+    def test_get_real_stock_bulk_empty_input_no_query(self):
+        cursor = MagicMock()
+        db = self._db_with_cursor(cursor)
+        result = db.get_real_stock_bulk([])
+        assert result == {}
+        cursor.execute.assert_not_called()
 
     def test_get_last_sync_run_uses_observed_log_when_available(self):
         cursor = MagicMock()

@@ -40,15 +40,15 @@ MIN_WINDOW_HOURS = 1
 MAX_WINDOW_HOURS = 168
 DEFAULT_MAX_PAGES = 20
 
-# Tetto sul numero di entry (lag + drift, combinate) arricchite con
-# get_real_stock() e serializzate nel body. lag_count/drift_count restano i
-# totali VERI (l'allarme); gli array "lag"/"drift" sono il campione (il
-# dettaglio) — oltre il cap una entry viene interrogata sul DB e riportata,
-# le altre no. Amendment 3, 2026-09-22: senza questo cap un drift storm
-# (mirror lookup vuoto/quasi vuoto) puo' generare fino a 10.000 entry, cioe'
-# fino a 10.000 round-trip DB dentro un'unica richiesta HTTP che il worker
-# gunicorn (--timeout 120) uccide prima che risponda — a differenza di
-# /api/trigger, /api/lag-check lavora dentro la request, non su un thread.
+# Tetto sul numero di entry (lag + drift, combinate) SERIALIZZATE nel body
+# come array "lag"/"drift". lag_count/drift_count e oversell_count restano i
+# totali VERI (l'allarme), calcolati su TUTTE le entry — mai sul campione.
+# Amendment 4, 2026-09-22: get_real_stock_bulk() (src/db.py) arricchisce
+# TUTTE le entry in query chunked per sku, non piu' una get_real_stock() per
+# entry, quindi il cap non serve piu' a limitare i round-trip DB — solo la
+# dimensione del body HTTP. Amendment 3, 2026-09-22: senza questo cap un
+# drift storm (mirror lookup vuoto/quasi vuoto) puo' generare fino a 10.000
+# entry serializzate in un'unica risposta di /api/lag-check.
 MAX_REPORTED_ENTRIES = 50
 
 
@@ -383,15 +383,15 @@ def run_lag_check(
         total_entries = lag_count + drift_count
         entries_truncated = total_entries > MAX_REPORTED_ENTRIES
 
-        # Amendment 3: arricchisci (get_real_stock) e riporta al massimo
-        # MAX_REPORTED_ENTRIES entry in totale su lag+drift combinate, "lag"
-        # prima di "drift" (stesso ordine dello status). Oltre il cap la
-        # entry resta classificata (e contata) ma non viene interrogata sul
-        # DB ne' serializzata — il verdetto (status/ok/lag_count/drift_count)
-        # resta esatto, solo il dettaglio e' campionato.
-        enriched = (result["lag"] + result["drift"])[:MAX_REPORTED_ENTRIES]
-        for entry in enriched:
-            real_stock = database.get_real_stock(entry["sku"], entry["size"])
+        # Amendment 4, 2026-09-22: arricchisci TUTTE le entry lag+drift in
+        # un'unica get_real_stock_bulk() (query chunked per sku, non piu' un
+        # round-trip per entry) — oversell_count e' quindi un totale VERO,
+        # esattamente come lag_count/drift_count: nessun cap lo tocca.
+        all_entries = result["lag"] + result["drift"]
+        pairs = [(entry["sku"], entry["size"]) for entry in all_entries]
+        real_stock_by_pair = database.get_real_stock_bulk(pairs)
+        for entry in all_entries:
+            real_stock = real_stock_by_pair.get((entry["sku"], entry["size"]))
             entry["real_stock"] = real_stock
             available = entry.get("shopify_available")
             if real_stock is not None and available is not None:
@@ -399,15 +399,15 @@ def run_lag_check(
             else:
                 entry["oversell"] = None
 
+        # MAX_REPORTED_ENTRIES resta SOLO un tetto di SERIALIZZAZIONE su
+        # lag+drift combinate, "lag" prima di "drift" (stesso ordine dello
+        # status): oltre il cap la entry resta classificata, contata E
+        # arricchita, solo non compare nel body. entries_truncated segnala
+        # che gli array sono un campione — nessun conteggio ne e' toccato.
         reported_lag = result["lag"][:MAX_REPORTED_ENTRIES]
         reported_drift = result["drift"][: max(0, MAX_REPORTED_ENTRIES - lag_count)]
 
-        # oversell_count e' calcolato SOLO sul campione arricchito (al massimo
-        # MAX_REPORTED_ENTRIES entry), NON sul totale lag_count+drift_count:
-        # oltre il cap una entry non viene mai interrogata su get_real_stock,
-        # quindi non puo' contribuire a oversell_count. Non leggerlo come un
-        # totale.
-        oversell_count = sum(1 for e in enriched if e.get("oversell") is True)
+        oversell_count = sum(1 for e in all_entries if e.get("oversell") is True)
 
         if lag_count and drift_count:
             status = "lag+drift"
