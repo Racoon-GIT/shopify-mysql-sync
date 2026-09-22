@@ -218,6 +218,10 @@ mean of 6.6 h.
    no per-inventory-item adjustment history for 2026-06/08.
 2. **That each logged 202 became a completed sync.** `/api/trigger` answers 202 and works in a
    background thread; `/api/status` is in-memory. **Class A = 4 is a lower bound.**
+   **Corollary for whoever reads `/api/status` next**: this repo auto-deploys, so *any* push —
+   a docs-only commit included — rebuilds `shopify-sync-ws`, restarts it and wipes that state.
+   An empty or reset `/api/status` is evidence of a restart, never of a missed run. The oracle
+   for "a run happened and worked" is the `drift` class of §7, not this endpoint.
 3. **Historical product `status` and `tags`** — read as of today, so anything DRAFT-or-untagged at order
    time scores OK. **Second reason class A is a lower bound.**
 4. **Statistical significance**: n = 4. Every cluster in §1.6 is descriptive. The size cluster is
@@ -520,3 +524,82 @@ The row is **not closed by this document**. Two legitimate outcomes, and the cho
 Either way `IT/SERVER/infra-hosts.md` §`SP_SHOP_ORDER_IN` — recordset contract should gain one line
 correcting *"worst-case 24 h"* to the measured 51.2 h, and the DST refinement of §1.2. That is SERVER's
 file; it goes back as knowledge, not as a new obligation.
+
+---
+
+## 7. Build record — option (d) as actually built
+
+`gate-1: Ale 2026-09-22` (recorded in `IT/coordinator-gates-2026-09.md`). Built read-only, in this
+lane only: `GET /api/lag-check` (`app.py`), the logic in `src/lag_check.py`, read methods in
+`src/db.py`, one bounded GraphQL read in `src/shopify_client.py`. Commits `e81197d` → `d572957` →
+`fd4622d`. **136 tests, green.** Not deployed: the code needs its own `GATE:push`.
+
+### What the endpoint reports
+
+Two classes, because one number would have been unactionable:
+
+- **`lag`** — variant absent from the mirror, created **after** the last completed sync. The
+  handoff's defect: sellable on Shopify, invisible to `SP_SHOP_ORDER_IN`.
+- **`drift`** — variant absent although it existed **before** the last sync, or present with a
+  price the sync had time to absorb and did not. **This is how the build also closes the TRACKER's
+  "monitoring of the daily run" item**: it detects a 202 that was accepted and then crashed, which
+  is exactly the shape of the 14 unlogged July nights of §1.7, and what
+  `../docs/dependencies-graph.md` says a new watcher should be built for.
+
+Stock is never compared — `available` moves on every sale and the mirror legitimately trails it
+until 03:04. Only price, which moves only by human action.
+
+### Three decisions taken after gate-1, and why
+
+1. **A second flag `checked`, orthogonal to `ok`.** The consumer is a Scheduler `response_match`
+   rule reading one JSONPath. With `ok` alone, `$.ok == false` fires identically for "there is a
+   gap" and "I could not look" — a monitor that cannot tell those apart teaches a false perimeter.
+2. **`skipped` returns `ok: false`, not `ok: true`.** The contract is now one invariant, asserted
+   table-driven across every status value:
+   > `ok` is true **if and only if** `checked` is true AND `lag_count == 0` AND `drift_count == 0`.
+
+   With `ok: true` on `skipped`, a watchdog that for any reason always answered `skipped` would read
+   green to a rule wired on `$.ok == false` — making the safety property depend on a job
+   configuration living in another repo. Both Scheduler rules still get wired, but as signal
+   quality, not as a safeguard.
+3. **The real-stock lookup is batched, and `oversell_count` is a true total.** The first build
+   issued one query per reported entry; the pagination ceiling (20 pages × 10 products × 50
+   variants) allows ~10,000 variants, and in a drift storm — the scenario this watchdog exists to
+   catch — every one becomes an entry. Unlike `/api/trigger`, which escapes gunicorn's
+   `--timeout 120` on a background thread, `/api/lag-check` works in the request: the worker would
+   have died exactly when it had most to report. Capping reported entries at 50 fixed the timeout
+   but left `oversell_count` a sample beside two true counts — so the lookup was batched instead
+   (`get_real_stock_bulk`, chunked 500 skus). All three counts are now true totals;
+   `MAX_REPORTED_ENTRIES = 50` is only a serialisation limit on the arrays, flagged by
+   `entries_truncated`.
+
+**The row-level contract that makes `oversell` trustworthy**, because the failure direction is
+asymmetric: a pair with no `stock` rows is **`0`** (a fact), a pair whose chunk raised is **`None`**
+(unknown). Seeding happens **per chunk, after that chunk succeeds** — seed globally and a failed
+chunk's pairs sit at `0`, turning "could not check" into "no stock". The old single-row query was a
+bare aggregate with no `GROUP BY`, so it always returned one row; adding `GROUP BY` to batch it makes
+an absent pair vanish from the result set, and reading that as unknown would make **a real oversell
+read clean**. That is the one error direction this watchdog cannot have.
+
+### Receipts
+
+| Receipt | State |
+|---|---|
+| Suite refuses on both branches (`lag` and `drift` return `ok:false`) | **done** — in the suite |
+| `mutate-verify.sh`, 3 mutants, all killed | **done** — `docs/gate-2-log.md` |
+| Live negative control on both branches against real Shopify and the real mirror | **pending — impossible before deploy**, which is behind `GATE:push` |
+
+The three mutations attack what was actually argued over, not what was easy: `ok` forced true on the
+success path; an absent pair seeded `None` instead of `0`; a failed chunk seeded `0` instead of
+`None`. All three were killed.
+
+### Still open after this build
+
+- **`GATE:push`** for the watchdog code, then the live negative control.
+- **The Scheduler job and its two alert rules** (`POST /api/jobs`, `POST /api/jobs/{id}/alerts`,
+  `response_match` on `$.ok` and on `$.checked`), schedule avoiding 03:00–03:15. In-lane, but it can
+  only point at a deployed endpoint.
+- **Live grants unverified**: whether `shopify-sync-ws`'s DB user holds `SELECT` on `stock`,
+  `sku_root`, `scheduler_jobs`, `scheduler_job_logs`. The code degrades to `inconclusive` or
+  `assumed_schedule` rather than lying, but degraded is not verified.
+- **The cause of the 14 unlogged July nights** (§1.7) — observed, never diagnosed.
