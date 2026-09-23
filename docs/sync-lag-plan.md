@@ -529,7 +529,11 @@ file; it goes back as knowledge, not as a new obligation.
 
 ## 7. Build record — option (d) as actually built
 
-`gate-1: Ale 2026-09-22` (recorded in `IT/coordinator-gates-2026-09.md`). Built read-only, in this
+**gate-1**: Ale chose option (d) on **2026-09-22**, relayed by the coordinator and recorded in
+`IT/coordinator-gates-2026-09.md`; put to him again directly in this lane on **2026-09-23** under
+`GATE:1`, naming this file, because a coordinator's row is not a receipt in the asking lane's own
+log and `guard-build.sh` correctly refused the push without one. Same answer both times. Built
+read-only, in this
 lane only: `GET /api/lag-check` (`app.py`), the logic in `src/lag_check.py`, read methods in
 `src/db.py`, one bounded GraphQL read in `src/shopify_client.py`. Commits `e81197d` → `d572957` →
 `fd4622d`. **136 tests, green.** Not deployed: the code needs its own `GATE:push`.

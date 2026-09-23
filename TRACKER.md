@@ -1,7 +1,7 @@
 # TRACKER — shopify-mysql-sync
 
 ## Current state
-Pipeline: gate-2 · item: sync-lag watchdog `/api/lag-check` (option (d)) · plan: docs/sync-lag-plan.md · gate-1: Ale 2026-09-22 · gate-2: mutate-verify 3/3 PASS, `/ship` + `GATE:push` pending
+Pipeline: gate-2 · item: sync-lag watchdog `/api/lag-check` (option (d)) · plan: docs/sync-lag-plan.md · gate-1: Ale 2026-09-23 · gate-2: mutate-verify 3/3 PASS, `GATE:push` granted
 
 **Phase**: the daily sync stays in production on Render (`shopify-sync-ws`, FREE, Frankfurt, 03:00 Rome). The open item is the **monitoring** Ale asked for on 2026-08-21 — now built as the sync-lag watchdog, committed and **not deployed**.
 
