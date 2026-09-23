@@ -1,14 +1,16 @@
 # TRACKER — shopify-mysql-sync
 
 ## Current state
-Pipeline: gate-2 · item: sync-lag watchdog `/api/lag-check` (option (d)) · plan: docs/sync-lag-plan.md · gate-1: Ale 2026-09-23 · gate-2: mutate-verify 3/3 PASS, `GATE:push` granted
+Pipeline: shipped · item: sync-lag watchdog `/api/lag-check` (option (d)) · plan: docs/sync-lag-plan.md · gate-1: Ale 2026-09-23 · gate-2: mutate-verify 4/4 PASS (`114d076` clean-tree), `/ship` run, pushed and deploy verified 2026-09-23
 
 **Phase**: the daily sync stays in production on Render (`shopify-sync-ws`, FREE, Frankfurt, 03:00 Rome). The open item is the **monitoring** Ale asked for on 2026-08-21 — now built as the sync-lag watchdog, committed and **not deployed**.
 
+**Deployed 2026-09-23**, verified by the only oracle available without a credential: `/api/lag-check` answers **401** where it answered **404** before the push — a route that exists only in the new commit. `/health` 200, `/api/trigger` 401 unchanged. The Render MCP was disconnected this session, so the dashboard was not consulted.
+
 **Next**:
-- [ ] `GATE:push` for `e81197d`/`d572957`/`fd4622d` (via coordinator), then the **live negative control**: fire `lag` and `drift` on purpose against real Shopify + the real mirror. The suite refusals and the mutants are receipts; the live half is not obtainable before deploy.
-- [ ] Register the Scheduler job + **two** alert rules (`response_match` on `$.ok` and on `$.checked`), schedule avoiding 03:00–03:15. In-lane (`Scheduler` `POST /api/jobs`, `POST /api/jobs/{id}/alerts`) — no SERVER handoff.
-- [ ] Verify live grants for `shopify-sync-ws`'s DB user on `stock`, `sku_root`, `scheduler_jobs`, `scheduler_job_logs`. The code degrades honestly if they are missing, but degraded is not verified.
+- [ ] **Register the Scheduler job + two alert rules** (`response_match` on `$.ok` and on `$.checked`), schedule avoiding 03:00–03:15. In-lane (`Scheduler` `POST /api/jobs`, `POST /api/jobs/{id}/alerts`) — no SERVER handoff. **This is also the path to the two checks below**: the Scheduler already holds this service's `TRIGGER_SECRET` (in `scheduler_jobs.headers`), so it can make the authenticated call that nobody should make by pulling a secret into a transcript.
+- [ ] **Live negative control, still owed**: fire `lag` and `drift` on purpose against real Shopify + the real mirror and see the endpoint refuse. The suite refusals and the four killed mutants are receipts; this one is not obtainable without an authenticated call. A watchdog that has only ever answered green on production has proven nothing.
+- [ ] **Read the first authenticated body** and confirm `last_sync_source` is `scheduler_job_logs` and not `assumed_schedule`, and that `status` is not `inconclusive`: that is the live proof the service's DB user really holds `SELECT` on `stock`, `sku_root`, `scheduler_jobs`, `scheduler_job_logs`. The code degrades honestly if a grant is missing — degraded is not verified, and a degrade here is a finding to report, not to hide.
 - [ ] Handoff row 2026-08-22 (SERVER → SVILUPPO) stays `in-progress`. Delete it only after the live control passes, in our own commit.
 - [ ] Give SERVER the two corrections for `infra-hosts.md`: worst case is a measured **51.2 h**, not 24 h; and pre-2026-06-16 `log.DataOra` is DST-aware `Europe/Rome`, not fixed CEST.
 
