@@ -887,10 +887,17 @@ class Database:
             Tuple[datetime | None, str]: (istante UTC, sorgente). Sorgente e'
             "scheduler_job_logs" se osservata, "assumed_schedule" se calcolata.
         """
+        # UNIX_TIMESTAMP e non DATE_FORMAT: mysql-connector-python sostituisce i
+        # parametri con la regex `(%s)` e non riconverte `%%` in `%`, quindi il
+        # `%%s` del formato consumava il parametro del WHERE e la query sollevava
+        # "Not enough parameters" — questo ramo non aveva mai funzionato in
+        # produzione (docs/sync-lag-plan.md §7). Nessun `%` letterale nello
+        # statement; su una colonna TIMESTAMP il valore non dipende dal time_zone
+        # di sessione.
         try:
             self.cursor.execute(
                 """
-                SELECT DATE_FORMAT(sjl.executed_at, '%%Y-%%m-%%d %%H:%%i:%%s') AS executed_at_str
+                SELECT UNIX_TIMESTAMP(sjl.executed_at) AS executed_at_epoch
                 FROM scheduler_job_logs sjl
                 JOIN scheduler_jobs sj ON sj.id = sjl.job_id
                 WHERE sj.name = %s
@@ -900,8 +907,8 @@ class Database:
                 (self.SCHEDULER_JOB_NAME,),
             )
             row = self.cursor.fetchone()
-            if row and row[0]:
-                dt = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            if row and row[0] is not None:
+                dt = datetime.fromtimestamp(int(row[0]), tz=timezone.utc)
                 return dt, "scheduler_job_logs"
         except Exception as exc:
             log(f"⚠️ get_last_sync_run: lettura scheduler_job_logs fallita, uso schedule assunto: {exc}")

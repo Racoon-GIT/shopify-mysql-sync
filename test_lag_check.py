@@ -13,6 +13,8 @@ from decimal import Decimal
 from unittest.mock import MagicMock
 
 import pytest
+from mysql.connector.cursor import RE_PY_PARAM, _ParamSubstitutor
+from mysql.connector.errors import ProgrammingError
 
 from src.config import Config, VALID_TAGS
 from src.db import Database
@@ -713,12 +715,23 @@ class TestDatabaseLagCheckMethods:
         cursor.execute.assert_not_called()
 
     def test_get_last_sync_run_uses_observed_log_when_available(self):
+        expected = datetime(2026, 9, 22, 1, 4, 0, tzinfo=timezone.utc)
         cursor = MagicMock()
-        cursor.fetchone.return_value = ("2026-09-22 01:04:00",)
+        cursor.fetchone.return_value = (int(expected.timestamp()),)
         db = self._db_with_cursor(cursor)
         dt, source = db.get_last_sync_run()
         assert source == "scheduler_job_logs"
-        assert dt == datetime(2026, 9, 22, 1, 4, 0, tzinfo=timezone.utc)
+        assert dt == expected
+
+    def test_get_last_sync_run_accepts_decimal_epoch(self):
+        """UNIX_TIMESTAMP torna DECIMAL se la colonna ha frazioni di secondo."""
+        expected = datetime(2026, 9, 22, 1, 4, 0, tzinfo=timezone.utc)
+        cursor = MagicMock()
+        cursor.fetchone.return_value = (Decimal(int(expected.timestamp())) + Decimal("0.250"),)
+        db = self._db_with_cursor(cursor)
+        dt, source = db.get_last_sync_run()
+        assert source == "scheduler_job_logs"
+        assert dt == expected
 
     def test_get_last_sync_run_falls_back_to_assumed_schedule_on_failure(self):
         """Caso 17 (lato DB): scheduler_job_logs irraggiungibile -> assumed_schedule, mai un raise."""
@@ -737,3 +750,89 @@ class TestDatabaseLagCheckMethods:
         dt, source = db.get_last_sync_run()
         assert source == "assumed_schedule"
         assert dt is not None
+
+
+# --- Le letture del watchdog attraverso il driver REALE ---
+
+
+class DriverSubstitutingCursor:
+    """
+    Cursore che applica la sostituzione dei parametri di mysql-connector-python
+    (`RE_PY_PARAM` + `_ParamSubstitutor`, lo stesso codice di
+    `MySQLCursor.execute`) prima di restituire righe predefinite. Un MagicMock
+    accetta qualunque statement; questo solleva dove solleverebbe il driver
+    ("Not enough parameters"), senza bisogno di un DB.
+    """
+
+    def __init__(self, fetchone=None, fetchall=None):
+        self._fetchone = fetchone
+        self._fetchall = fetchall if fetchall is not None else []
+        self.sent = []  # statement come arriverebbero al server
+
+    def execute(self, operation, params=None):
+        stmt = operation.encode("utf-8")
+        if params is not None:
+            psub = _ParamSubstitutor([b"'x'" for _ in params])
+            stmt = RE_PY_PARAM.sub(psub, stmt)
+            if psub.remaining != 0:
+                raise ProgrammingError("Not all parameters were used in the SQL statement")
+        self.sent.append(stmt)
+
+    def fetchone(self):
+        return self._fetchone
+
+    def fetchall(self):
+        return self._fetchall
+
+
+class TestWatchdogSqlThroughRealDriver:
+    """
+    Le quattro letture di /api/lag-check eseguite attraverso la sostituzione dei
+    parametri del driver reale. Classe del difetto del 2026-09-23: con un
+    MagicMock `get_last_sync_run` era verde nella suite e rotto in produzione,
+    perche' il `%%s` di un DATE_FORMAT consumava il parametro del WHERE
+    (docs/sync-lag-plan.md §7).
+    """
+
+    def _db(self, cursor):
+        db = Database(_make_config())
+        db._cursor = cursor
+        db._connection = MagicMock()
+        return db
+
+    def _assert_sent_clean(self, cursor):
+        assert cursor.sent, "nessuno statement eseguito"
+        for stmt in cursor.sent:
+            # il driver non riconverte mai `%%`: se arriva al server e' un bug
+            assert b"%%" not in stmt
+            assert b"%s" not in stmt
+
+    def test_get_last_sync_run_reads_observed_log(self):
+        expected = datetime(2026, 9, 23, 1, 0, 2, tzinfo=timezone.utc)
+        cursor = DriverSubstitutingCursor(fetchone=(int(expected.timestamp()),))
+        dt, source = self._db(cursor).get_last_sync_run()
+        assert source == "scheduler_job_logs"
+        assert dt == expected
+        self._assert_sent_clean(cursor)
+
+    def test_get_mirror_count(self):
+        cursor = DriverSubstitutingCursor(fetchone=(9195,))
+        assert self._db(cursor).get_mirror_count() == 9195
+        self._assert_sent_clean(cursor)
+
+    def test_get_mirror_rows_by_variant_ids(self):
+        cursor = DriverSubstitutingCursor(
+            fetchall=[(101, "SKU-A", "40", Decimal("179.00"), 9001)]
+        )
+        result = self._db(cursor).get_mirror_rows_by_variant_ids([101, 102, 103])
+        assert result[101]["price"] == Decimal("179.00")
+        assert 102 not in result
+        self._assert_sent_clean(cursor)
+
+    def test_get_real_stock_bulk(self):
+        # Chunk riuscito, nessuna riga stock -> 0 (un fatto). Se il driver
+        # sollevasse, il chunk varrebbe None e l'assert fallirebbe.
+        cursor = DriverSubstitutingCursor(fetchall=[])
+        result = self._db(cursor).get_real_stock_bulk([("SKU-A", "40"), ("SKU-B", "41")])
+        assert result == {("SKU-A", "40"): 0, ("SKU-B", "41"): 0}
+        self._assert_sent_clean(cursor)
