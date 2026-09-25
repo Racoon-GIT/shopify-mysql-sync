@@ -536,7 +536,9 @@ log and `guard-build.sh` correctly refused the push without one. Same answer bot
 read-only, in this
 lane only: `GET /api/lag-check` (`app.py`), the logic in `src/lag_check.py`, read methods in
 `src/db.py`, one bounded GraphQL read in `src/shopify_client.py`. Commits `e81197d` → `d572957` →
-`fd4622d`. **136 tests, green.** Not deployed: the code needs its own `GATE:push`.
+`fd4622d`. **136 tests, green.** Deployed 2026-09-23 at `39b12ab`. A defect found by the first live check
+(§Live receipts below) was fixed at `5d8bc6a` and deployed on 2026-09-25 at `45acf9f`. After the fix: **141 tests**,
+and `mutate-verify` passed 5/5 on a clean tree.
 
 ### What the endpoint reports
 
@@ -590,20 +592,100 @@ read clean**. That is the one error direction this watchdog cannot have.
 | Receipt | State |
 |---|---|
 | Suite refuses on both branches (`lag` and `drift` return `ok:false`) | **done** — in the suite |
-| `mutate-verify.sh`, 3 mutants, all killed | **done** — `docs/gate-2-log.md` |
-| Live negative control on both branches against real Shopify and the real mirror | **pending — impossible before deploy**, which is behind `GATE:push` |
+| `mutate-verify.sh` | **done**. 4 mutants before the fix. After it, the run was redone **from scratch on `5d8bc6a`, clean tree: 5/5 killed** (`docs/gate-2-log.md`) |
+| Live refusal on `checked` | **done** 2026-09-23 and again 2026-09-25: `?hours=168` → `ok:false, checked:false, inconclusive/page_cap_reached` |
+| Live read of the last sync run | **done** 2026-09-25, after the fix: `last_sync_source: scheduler_job_logs`, `last_sync_utc 2026-09-25T01:00:03Z`, equal to the sync job's `lastRun` |
+| Scheduler job and its three rules, each seen firing | **done** 2026-09-25 (§Live receipts) |
+| Live `lag` / `drift` | **not taken**. Named gap G1, with its closing condition |
 
-The three mutations attack what was actually argued over, not what was easy: `ok` forced true on the
-success path; an absent pair seeded `None` instead of `0`; a failed chunk seeded `0` instead of
-`None`. All three were killed.
+The mutations attack what was actually argued over, not what was easy:
+- `ok` forced true on the success path;
+- an absent pair seeded `None` instead of `0`;
+- a failed chunk seeded `0` instead of `None`;
+- the serialisation cap lifted;
+- since the fix, the last-sync read reverted to its broken `%%` form.
 
-### Still open after this build
+### Live receipts, 2026-09-23 → 2026-09-25
 
-- **`GATE:push`** for the watchdog code, then the live negative control.
-- **The Scheduler job and its two alert rules** (`POST /api/jobs`, `POST /api/jobs/{id}/alerts`,
-  `response_match` on `$.ok` and on `$.checked`), schedule avoiding 03:00–03:15. In-lane, but it can
-  only point at a deployed endpoint.
-- **Live grants unverified**: whether `shopify-sync-ws`'s DB user holds `SELECT` on `stock`,
-  `sku_root`, `scheduler_jobs`, `scheduler_job_logs`. The code degrades to `inconclusive` or
-  `assumed_schedule` rather than lying, but degraded is not verified.
+The caller is the Scheduler job `f5798d47-49bf-4fc2-bd00-3967af175293` `Shopify-MySQL-Sync_LagCheck`, cron
+`0 8-21 * * *` Europe/Rome, `?hours=48`, timeout 60 s. Its `Authorization` header was copied Scheduler→Scheduler
+and never printed, which makes it a third consumer of this service's `TRIGGER_SECRET`
+(`../docs/shared-secrets.md`). The job was created `enabled:false`, run by hand for every check below, and
+enabled last.
+
+- **S1**: `?hours=168` → HTTP 200, `ok:false, checked:false, inconclusive / page_cap_reached`. This is the watchdog's
+  first live refusal. The cause is the catalogue itself: 248 ACTIVE products were updated in 168 h, and the
+  page cap is 20 × 10 = 200. It is the only verdict an input alone can force.
+- **S2, 2026-09-23 — red.** `?hours=48` → `clean`, but with `last_sync_source: assumed_schedule`. That is the defect described
+  in the next section.
+- **S2, 2026-09-25 — green** after `45acf9f` was deployed: `scheduler_job_logs`, `01:00:03Z`. Only the new code can produce that
+  value, so this read is also the deploy oracle.
+- **S3**: three rules, recipient `it-services@racoon-lab.it` (internal only), dedup 720 min:
+  - `response_match $.ok eq false`, meaning "there is a gap";
+  - `response_match $.checked eq false`, meaning "could not look";
+  - `fail`, meaning "could not reach". `fail` is needed because a `response_match` rule cannot fire on a 401, a timeout
+    or a non-JSON body (Scheduler `src/lib/alerts/jsonpath.ts:141-164`). A wrong copied header would otherwise be silent.
+- **S4, each rule seen firing**, read from `scheduler_alert_history`, not from the mailbox. The rules were run with dedup off
+  and set to 720 afterwards, so the exercise leaves no dedup window over real events:
+
+  | Run | Expected | Fired |
+  |---|---|---|
+  | `?hours=168` (log `e118ebc2`) | `$.ok` + `$.checked` | both, `sent` |
+  | `?hours=48` (log `f855b799`) | none | none |
+  | path that answers 404 (log `d8b1c2d6`) | `fail` | `fail` only, `sent` |
+
+- **S5**: `enabled:true`. Measured warm durations were 0.9–8 s; a cold `/health` took 22 s. Both are inside the 60 s timeout.
+
+### The defect the first live check found, and its class
+
+`get_last_sync_run()` passed `DATE_FORMAT(sjl.executed_at, '%%Y-…%%s')` next to one bound parameter. The problem
+comes from how mysql-connector-python substitutes parameters:
+- it uses the regex `(%s)` and never turns `%%` back into `%`;
+- so the `%s` inside `%%s` consumed the `WHERE` parameter;
+- the statement then raised *Not enough parameters for the SQL statement*;
+- and the bare `except` fell back to the assumed 03:04.
+
+This was reproduced with the pinned 9.6.0 driver's own code. **The observed-log path had never worked anywhere,
+in production or in the suite.** Before the fix, the watchdog assumed a sync had run on exactly the nights
+`drift` exists for, the nights it never ran. The `ok` contract was not affected.
+
+**The line was not the problem; the mocks were.** Every DB test fed a `MagicMock` cursor, which accepts any
+statement and so cannot say anything about the driver. The fix has two parts:
+- `5d8bc6a` reads the value with `UNIX_TIMESTAMP`, so no literal `%` is left in the statement;
+- `TestWatchdogSqlThroughRealDriver` runs all four watchdog read statements through the driver's real
+  substitution, with no DB and with behavioural asserts.
+
+The `%%` mutant is killed **only** by that test: against the broken statement it fails 1 test, and all 140 others,
+the mocked ones included, pass. Any new SQL that
+the watchdog sends belongs in that class.
+
+### Named gaps
+
+- **G1: `lag` and `drift` have never fired live.** The measurement of 2026-09-23 found:
+  - 0 variants absent from the mirror and 0 price drift over 168 h;
+  - only 4 new variants in 30 days, all on one day;
+  - and the endpoint takes one input, `?hours=`, which cannot force either verdict.
+
+  Provoking them would mean creating a buyable variant on a live ACTIVE product, on the made-to-order
+  path where one measured case sold 43 minutes after the variant existed. **Ale declined that write
+  (2026-09-24).** Until then, the proof is the suite plus the killed mutants.
+  **Closing condition: the first real occurrence.** That is a job run with `checked:true` and `lag_count` or
+  `drift_count` > 0, a `$.ok` alert in `scheduler_alert_history`, and its body kept. The same run is the first
+  live read of `stock` / `sku_root`, because a clean run never queries them.
+- **G2: documented, not measured.**
+  - Measured: SELECT on `scheduler_*` is proven live (S2, 2026-09-25).
+  - Measured: `SHOW GRANTS FOR 'RacAdmin'@'%'` → `ALL PRIVILEGES ON racoon.*`, with `partial_revokes` OFF (2026-09-23).
+  - Not measured: that `shopify-sync-ws` logs in as `RacAdmin`. `infra-hosts.md:212` documents it, but `DB_USER` is
+    `sync: false` in `render.yaml` and its value was not read.
+- **G4: the label, not the verdict.** The lag/drift split keys on the variant's `createdAt`, not on when the product
+  became eligible. A product activated or tagged after the sync is therefore reported as `drift`. `ok` stays false, so the
+  alert still fires. Not restructured.
+- **G5: the alert text.** Scheduler rules have no free-text field; the mail shows `<path> <op> <value>`. "Gap" and "could not look" are
+  therefore told apart by `$.ok` versus `$.checked`. Literal texts would need a change in the Scheduler repo.
+- **Quota (a calculation, not a measurement).** The FREE instance spins down after 15 minutes idle. 14 calls a day keep it awake up to ~3.5 h/day,
+  of the workspace's 750 h/month.
+
+### Still open
+
 - **The cause of the 14 unlogged July nights** (§1.7) — observed, never diagnosed.
+- On 2026-09-25 the Scheduler's `GET /api/jobs/{id}/logs` answered 500 for two jobs. That is Scheduler's to look at, not changed here.
