@@ -1,17 +1,21 @@
 # TRACKER — shopify-mysql-sync
 
 ## Current state
-Pipeline: shipped · item: sync-lag watchdog `/api/lag-check` (option (d)) · plan: docs/sync-lag-plan.md · gate-1: Ale 2026-09-23 · gate-2: mutate-verify 4/4 PASS (`114d076` clean-tree), `/ship` run, pushed and deploy verified 2026-09-23
+Pipeline: gate-2 · item: sync-lag watchdog `/api/lag-check` (option (d)), fix of the last-sync read `5d8bc6a` · plan: docs/sync-lag-plan.md · gate-1: Ale 2026-09-23 · gate-2: mutate-verify 5/5 PASS on `5d8bc6a` clean-tree (docs/gate-2-log.md), `/ship` + `GATE:push` pending
 
-**Phase**: the daily sync stays in production on Render (`shopify-sync-ws`, FREE, Frankfurt, 03:00 Rome). The open item is the **monitoring** Ale asked for on 2026-08-21 — now built as the sync-lag watchdog, committed and **not deployed**.
+**Phase**: the daily sync stays in production on Render (`shopify-sync-ws`, FREE, Frankfurt, 03:00 Rome). The open item is the **monitoring** Ale asked for on 2026-08-21: the sync-lag watchdog, deployed 2026-09-23 at `39b12ab`. A defect found live is fixed at `5d8bc6a`; the fix is committed and **not pushed**.
 
-**Deployed 2026-09-23**, verified by the only oracle available without a credential: `/api/lag-check` answers **401** where it answered **404** before the push — a route that exists only in the new commit. `/health` 200, `/api/trigger` 401 unchanged. The Render MCP was disconnected this session, so the dashboard was not consulted.
+**Live checks, 2026-09-23**, run through the Scheduler job `f5798d47-49bf-4fc2-bd00-3967af175293` `Shopify-MySQL-Sync_LagCheck` (`enabled:false`, headers copied Scheduler→Scheduler, no value printed):
+- **S1 green**: `?hours=168` → `ok:false, checked:false, inconclusive/page_cap_reached`. This is the first live refusal; the cause was 248 products in 168 h, above the 200-product page cap.
+- **S2 red**: `?hours=48` → `clean`, but `last_sync_source:assumed_schedule`. Cause: `DATE_FORMAT('%%…%%s')` next to a bound parameter. mysql-connector's `(%s)` regex consumed the parameter, raised "Not enough parameters", and the code fell back. The observed-log path had never worked anywhere. Fixed with `UNIX_TIMESTAMP`, and all four watchdog statements now also run through the real driver's substitution. Coordinator authorised the fix in-lane on 2026-09-24.
 
 **Next**:
-- [ ] **Register the Scheduler job + two alert rules** (`response_match` on `$.ok` and on `$.checked`), schedule avoiding 03:00–03:15. In-lane (`Scheduler` `POST /api/jobs`, `POST /api/jobs/{id}/alerts`) — no SERVER handoff. **This is also the path to the two checks below**: the Scheduler already holds this service's `TRIGGER_SECRET` (in `scheduler_jobs.headers`), so it can make the authenticated call that nobody should make by pulling a secret into a transcript.
-- [ ] **Live negative control, still owed**: fire `lag` and `drift` on purpose against real Shopify + the real mirror and see the endpoint refuse. The suite refusals and the four killed mutants are receipts; this one is not obtainable without an authenticated call. A watchdog that has only ever answered green on production has proven nothing.
-- [ ] **Read the first authenticated body** and confirm `last_sync_source` is `scheduler_job_logs` and not `assumed_schedule`, and that `status` is not `inconclusive`: that is the live proof the service's DB user really holds `SELECT` on `stock`, `sku_root`, `scheduler_jobs`, `scheduler_job_logs`. The code degrades honestly if a grant is missing — degraded is not verified, and a degrade here is a finding to report, not to hide.
-- [ ] Handoff row 2026-08-22 (SERVER → SVILUPPO) stays `in-progress`. Delete it only after the live control passes, in our own commit.
+- [ ] `/ship` + `GATE:push` via the coordinator for `39b12ab..HEAD`, then deploy verification.
+- [ ] S2 again: `last_sync_source` must be `scheduler_job_logs` and `last_sync_utc` must equal the latest `Shopify-MySQL-Sync` log row.
+- [ ] S3–S5: rules `response_match $.ok eq false`, `response_match $.checked eq false`, `fail` (`it-services@racoon-lab.it`, internal). Exercise them: `?hours=168` should fire both, `?hours=48` should fire none. Then `enabled:true`, cron `0 8-21 * * *` Europe/Rome.
+- [ ] `docs/sync-lag-plan.md` §7: record the live receipts. Record G1 as a named gap: `lag`/`drift` never fired live, Ale declined a Shopify write, and the first real occurrence closes it. Record G2 as documented-not-measured: `RacAdmin` has ALL on `racoon.*`, but the service's `DB_USER` is not read.
+- [ ] `../docs/shared-secrets.md`: the job is a third consumer of the shopify-sync `TRIGGER_SECRET` (census). Add an exposure-register row for `.claude/settings.local.json` (`DB_USER=root` + `DB_PASS`). The file must not be opened, and the secret must not be rotated (frozen).
+- [ ] Handoff row 2026-08-22 (SERVER → SVILUPPO) stays `in-progress`. Delete it only after S1–S5 are green and the gap is written.
 - [ ] Give SERVER the two corrections for `infra-hosts.md`: worst case is a measured **51.2 h**, not 24 h; and pre-2026-06-16 `log.DataOra` is DST-aware `Europe/Rome`, not fixed CEST.
 
 **Active constraints & decisions**:
