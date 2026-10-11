@@ -11,7 +11,7 @@ Pipeline: shipped · item: sync-lag watchdog `/api/lag-check` (option (d)) · pl
 
 **Phase**: the daily sync runs in production on Render (`shopify-sync-ws`, FREE, Frankfurt, 03:00 Rome). The sync-lag watchdog is live and watched.
 - Scheduler job `f5798d47-49bf-4fc2-bd00-3967af175293` `Shopify-MySQL-Sync_LagCheck`: cron `0 8-21 * * *` Europe/Rome, `?hours=48`, timeout 60 s.
-- Three rules, to `it-services@racoon-lab.it`, dedup 720: `$.ok eq false` (a gap), `$.checked eq false` (could not look), `fail` (could not reach). Each was seen firing on 2026-09-25.
+- Three rules, to `it-services@racoon-lab.it`, dedup 720: `$.status matches "lag|drift"` (a gap, rule `24ce17cd`), `$.checked eq false` (could not look), `fail` (could not reach). The gap rule was `$.ok eq false` until 2026-10-11 09:15Z: by the `ok` invariant it co-fired with `checked` on every inconclusive run (2 mails per event) and its dedup let an inconclusive mask a real gap for 12 h. Checked offline with Scheduler's own `evaluateResponseMatch` @`cbd2f8b`: exactly 1 mail per `ok:false` body (inconclusive, skipped, lag, drift, lag+drift), 0 on clean. Old config: `{"path":"$.ok","operator":"eq","value":false}`. The new gap rule has never fired live (G1).
 - First scheduled run: 2026-09-25 14:00:26Z, success.
 - Handoff row 2026-08-22 (SERVER → SVILUPPO) closed in `a525849`. Receipts and gaps are in `docs/sync-lag-plan.md` §7.
 
@@ -24,7 +24,7 @@ Pipeline: shipped · item: sync-lag watchdog `/api/lag-check` (option (d)) · pl
 **Active constraints & decisions**:
 - **`ok` is true IFF `checked` is true AND `lag_count == 0` AND `drift_count == 0`**. This is one invariant, asserted table-driven across every status. `skipped` is `ok:false` on purpose.
 - **Every SQL the watchdog sends goes through `TestWatchdogSqlThroughRealDriver`** (real driver substitution, no DB). A MagicMock cursor proves nothing about the driver: that is how `get_last_sync_run` stayed green while broken in production until `5d8bc6a`. mysql-connector never turns `%%` back into `%`, so a literal `%` must never share a statement with a bound parameter.
-- **`?hours=168` is `inconclusive/page_cap_reached`** while more than 200 products are updated in 7 days: 248 were measured on 2026-09-23. It is the only input-forced refusal; keep the job on 48 h.
+- **`page_cap_reached` = more than 200 products updated inside the window.** `?hours=168` hits it (248 measured 2026-09-23), so the job stays on 48 h — but **48 h is not immune**: 28 consecutive runs `inconclusive/page_cap_reached` from 2026-10-06 18:00Z to 10-08 17:00Z, self-recovered 18:00Z, clean since (`scheduler_job_logs`, read 2026-10-11). A burst is a blind spell, not a fault; act only if it outlasts 48 h.
 - **`lag` vs `drift`**: `lag` = created after the last sync; `drift` = the sync had time and did not absorb it. The label keys on the variant's `createdAt`, not on when the product became eligible (G4). `ok` is unaffected.
 - The job's header is a third consumer of this service's `TRIGGER_SECRET` (`../docs/shared-secrets.md`). On rotation, update both job rows and the Render env. Rotation is frozen.
 - Read-only everywhere: there is no second writer into `online_products`. TLS to `racoon` with `DB_CA_CERT`. Keep the service FREE-tier safe.
