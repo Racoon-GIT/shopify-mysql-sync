@@ -956,7 +956,6 @@ class ShopifyClient:
             Dict[int, List[str]]: {product_id: [collection_title1, ...]}
         """
         legacy_map, rest_collection_ids = self._build_legacy_collections_map()
-        reset_new_model_collections_status()
 
         try:
             extra, n_collections = self._fetch_new_model_collections(rest_collection_ids)
