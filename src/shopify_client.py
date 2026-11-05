@@ -7,12 +7,31 @@ Supporta sia REST API che GraphQL Admin API.
 import time
 import json as json_module  # Evita shadowing con parametro 'json'
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any, List, Generator, Tuple
+from typing import Optional, Dict, Any, List, Generator, Set, Tuple
 from collections import defaultdict
 
 import requests
 
 from .config import Config, log
+
+# Esito dell'ultimo passo "collezioni nuovo modello" (letto da app.py per /api/status):
+# None = non ancora eseguito in questo run; "failed"; "ok: <n> collections, <m> products".
+_new_model_collections_status: Optional[str] = None
+
+
+def get_new_model_collections_status() -> Optional[str]:
+    """Esito dell'ultimo passo collezioni nuovo modello (None se non eseguito)."""
+    return _new_model_collections_status
+
+
+def reset_new_model_collections_status() -> None:
+    """Azzera l'esito: chiamato all'inizio di ogni run, mai un valore del run precedente."""
+    set_new_model_collections_status(None)
+
+
+def set_new_model_collections_status(value: Optional[str]) -> None:
+    global _new_model_collections_status
+    _new_model_collections_status = value
 
 
 class ShopifyClient:
@@ -160,6 +179,43 @@ class ShopifyClient:
     }
     """
 
+    # Passo "collezioni nuovo modello" (API 2026-10): REST non le vede mai, GraphQL
+    # sotto 2026-07 neppure. Solo id e titolo: il costo resta minimo.
+    GRAPHQL_NEW_MODEL_COLLECTIONS_QUERY = """
+    query NewModelCollections($cursor: String) {
+        collections(first: 250, after: $cursor) {
+            pageInfo {
+                hasNextPage
+                endCursor
+            }
+            nodes {
+                id
+                title
+            }
+        }
+    }
+    """
+
+    GRAPHQL_NEW_MODEL_COLLECTION_PRODUCTS_QUERY = """
+    query NewModelCollectionProducts($id: ID!, $cursor: String) {
+        collection(id: $id) {
+            products(first: 250, after: $cursor) {
+                pageInfo {
+                    hasNextPage
+                    endCursor
+                }
+                nodes {
+                    id
+                }
+            }
+        }
+    }
+    """
+
+    # Tetto di sicurezza per ogni paginazione del passo: un cursore che non avanza
+    # mai terrebbe occupato il thread di sync (running=True) all'infinito.
+    NEW_MODEL_MAX_PAGES = 100
+
     def __init__(self, config: Config):
         """
         Inizializza il client Shopify.
@@ -290,7 +346,8 @@ class ShopifyClient:
         self,
         query: str,
         variables: Optional[Dict[str, Any]] = None,
-        max_retries: int = 5
+        max_retries: int = 5,
+        url: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Esegue una query GraphQL Admin API.
@@ -299,6 +356,7 @@ class ShopifyClient:
             query: Query GraphQL
             variables: Variabili della query
             max_retries: Numero massimo di tentativi
+            url: URL GraphQL alternativo (default: quello del pin del servizio)
 
         Returns:
             Dict: Risposta JSON (campo 'data')
@@ -306,7 +364,7 @@ class ShopifyClient:
         Raises:
             Exception: Se la query fallisce
         """
-        url = self.config.graphql_url()
+        url = url or self.config.graphql_url()
         payload = {"query": query}
         if variables:
             payload["variables"] = variables
@@ -758,14 +816,15 @@ class ShopifyClient:
             log(f"  ❌ Errore rimozione inventory level: {e}")
             return False
 
-    def build_product_collections_map(self) -> Dict[int, List[str]]:
+    def _build_legacy_collections_map(self) -> Tuple[Dict[int, List[str]], Set[int]]:
         """
-        Costruisce mappa prodotto -> collezioni.
+        Percorso REST legacy (invariato): mappa prodotto -> collezioni.
 
         Returns:
-            Dict[int, List[str]]: {product_id: [collection_title1, ...]}
+            (mappa {product_id: [titoli]}, id numerici delle collezioni elencate da REST)
         """
         product_to_collections: Dict[int, List[str]] = defaultdict(list)
+        rest_collection_ids: Set[int] = set()
 
         def fetch_collections(endpoint: str):
             url = self.config.api_url(f"{endpoint}?limit=250")
@@ -778,6 +837,7 @@ class ShopifyClient:
                 for coll in collections:
                     coll_id = coll["id"]
                     title = coll["title"]
+                    rest_collection_ids.add(int(coll_id))
 
                     # Recupera prodotti nella collezione
                     prod_url = self.config.api_url(f"collections/{coll_id}/products.json?limit=250")
@@ -797,7 +857,123 @@ class ShopifyClient:
         fetch_collections("smart_collections.json")
 
         log(f"✅ Mappa collezioni creata con {len(product_to_collections)} prodotti.")
-        return dict(product_to_collections)
+        return dict(product_to_collections), rest_collection_ids
+
+    @staticmethod
+    def _gid_to_int(gid: Any, kind: str) -> int:
+        """Estrae l'id numerico da `gid://shopify/<kind>/<n>`; ValueError se non conforme."""
+        prefix = f"gid://shopify/{kind}/"
+        if not isinstance(gid, str) or not gid.startswith(prefix):
+            raise ValueError(f"GID {kind} non valido: {gid!r}")
+        tail = gid[len(prefix):]
+        if not (tail.isascii() and tail.isdigit()):
+            raise ValueError(f"GID {kind} non valido: {gid!r}")
+        return int(tail)
+
+    def _graphql_pages(
+        self,
+        query: str,
+        variables: Dict[str, Any],
+        url: str,
+        root: Tuple[str, ...],
+    ) -> Generator[Dict[str, Any], None, None]:
+        """
+        Pagina una connection del passo nuovo modello e ne restituisce i `nodes`.
+        `root` e' il percorso della connection in `data` (es. ("collection", "products")).
+        Qualunque anomalia (data nullo, collection nulla, cursore mancante, troppe pagine)
+        solleva: il chiamante scarta l'intero passo.
+        """
+        cursor: Optional[str] = None
+        for _ in range(self.NEW_MODEL_MAX_PAGES):
+            data = self.graphql(query, {**variables, "cursor": cursor}, url=url)
+            conn: Any = data
+            for key in root:
+                conn = conn[key]
+            if conn is None:
+                raise ValueError(f"connection nulla: {'.'.join(root)}")
+            for node in conn["nodes"]:
+                yield node
+            page_info = conn["pageInfo"]
+            if not page_info["hasNextPage"]:
+                return
+            cursor = page_info["endCursor"]
+            if not cursor:
+                raise ValueError("hasNextPage senza endCursor")
+        raise ValueError(f"oltre {self.NEW_MODEL_MAX_PAGES} pagine")
+
+    def _fetch_new_model_collections(
+        self, rest_collection_ids: Set[int]
+    ) -> Tuple[Dict[int, List[str]], int]:
+        """
+        Passo GraphQL (API 2026-10): collezioni che REST non elenca e relativi prodotti.
+
+        Returns:
+            ({product_id: [titoli]} con le collezioni per id crescente, n. collezioni nuovo modello)
+
+        Raises:
+            Exception: a qualunque errore (all-or-nothing: nessun risultato parziale).
+        """
+        url = self.config.new_model_collections_graphql_url()
+
+        new_collections: Dict[int, str] = {}
+        for node in self._graphql_pages(
+            self.GRAPHQL_NEW_MODEL_COLLECTIONS_QUERY, {}, url, ("collections",)
+        ):
+            coll_id = self._gid_to_int(node["id"], "Collection")
+            if coll_id in rest_collection_ids:
+                continue
+            title = node["title"]
+            if not isinstance(title, str):
+                raise ValueError(f"titolo collezione non valido: {title!r}")
+            new_collections[coll_id] = title
+
+        extra: Dict[int, List[str]] = {}
+        for coll_id in sorted(new_collections):
+            title = new_collections[coll_id]
+            gid = f"gid://shopify/Collection/{coll_id}"
+            for node in self._graphql_pages(
+                self.GRAPHQL_NEW_MODEL_COLLECTION_PRODUCTS_QUERY,
+                {"id": gid},
+                url,
+                ("collection", "products"),
+            ):
+                product_id = self._gid_to_int(node["id"], "Product")
+                extra.setdefault(product_id, []).append(title)
+
+        return extra, len(new_collections)
+
+    def build_product_collections_map(self) -> Dict[int, List[str]]:
+        """
+        Costruisce mappa prodotto -> collezioni.
+
+        Percorso REST legacy + un passo GraphQL additivo (API 2026-10) per le
+        collezioni del nuovo modello, che REST non vede. I titoli nuovi si
+        accodano a quelli legacy, per id collezione crescente. Fail-soft e
+        all-or-nothing: qualunque errore nel passo -> mappa legacy invariata,
+        una riga ERROR, esito "failed" (mai appartenenza parziale).
+
+        Returns:
+            Dict[int, List[str]]: {product_id: [collection_title1, ...]}
+        """
+        legacy_map, rest_collection_ids = self._build_legacy_collections_map()
+        reset_new_model_collections_status()
+
+        try:
+            extra, n_collections = self._fetch_new_model_collections(rest_collection_ids)
+            merged = {pid: list(titles) for pid, titles in legacy_map.items()}
+            for pid, titles in extra.items():
+                merged.setdefault(pid, []).extend(titles)
+        except Exception as exc:
+            log(
+                "❌ ERROR collezioni nuovo modello: passo scartato, "
+                f"mappa legacy invariata ({type(exc).__name__}: {exc})"
+            )
+            set_new_model_collections_status("failed")
+            return legacy_map
+
+        log(f"ℹ️ INFO collezioni nuovo modello: {n_collections} collezioni, {len(extra)} prodotti")
+        set_new_model_collections_status(f"ok: {n_collections} collections, {len(extra)} products")
+        return merged
 
     @staticmethod
     def extract_product_metafields(metafields: Dict[str, Any]) -> Dict[str, Any]:

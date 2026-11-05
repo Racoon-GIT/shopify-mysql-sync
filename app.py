@@ -9,7 +9,7 @@ import threading
 import time
 from flask import Flask, jsonify, request
 
-from src import lag_check
+from src import lag_check, shopify_client
 from src.config import Config
 
 app = Flask(__name__)
@@ -24,6 +24,9 @@ sync_status = {
     "last_status": None,
     "last_duration": None,
     "last_error": None,
+    # Esito del passo collezioni nuovo modello dell'ultimo run: None | "failed" |
+    # "ok: <n> collections, <m> products" (in-memory, come il resto).
+    "new_model_collections": None,
 }
 
 
@@ -32,8 +35,10 @@ def run_sync():
     from shopify_to_mysql import main as sync_main
     from src.config import log
 
+    shopify_client.reset_new_model_collections_status()
     with _sync_lock:
         sync_status["last_error"] = None
+        sync_status["new_model_collections"] = None
     start = time.time()
 
     try:
@@ -47,6 +52,7 @@ def run_sync():
             sync_status["last_error"] = str(exc)
     finally:
         with _sync_lock:
+            sync_status["new_model_collections"] = shopify_client.get_new_model_collections_status()
             sync_status["running"] = False
             sync_status["last_duration"] = round(time.time() - start, 1)
             sync_status["last_run"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())

@@ -25,6 +25,12 @@ VALID_TAGS = frozenset({
 })
 
 
+# Versione API dedicata al passo "collezioni del nuovo modello" (Shopify 2026-07+):
+# REST non le vede a nessuna versione, GraphQL solo da 2026-07. Non e' il pin del
+# servizio (`Config.api_version`, SHOPIFY_API_VERSION, render.yaml): quello non si tocca.
+NEW_MODEL_COLLECTIONS_API_VERSION = "2026-10"
+
+
 @dataclass
 class Config:
     """Configurazione centralizzata dell'applicazione."""
@@ -145,3 +151,16 @@ class Config:
             str: URL GraphQL endpoint
         """
         return f"https://{self.shop_domain}/admin/api/{self.api_version}/graphql.json"
+
+    def new_model_collections_graphql_url(self) -> str:
+        """
+        URL GraphQL alla versione dedicata del passo collezioni nuovo modello
+        (NEW_MODEL_COLLECTIONS_API_VERSION), indipendente da `api_version`.
+
+        Returns:
+            str: URL GraphQL endpoint
+        """
+        return (
+            f"https://{self.shop_domain}/admin/api/"
+            f"{NEW_MODEL_COLLECTIONS_API_VERSION}/graphql.json"
+        )
