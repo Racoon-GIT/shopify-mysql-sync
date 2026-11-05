@@ -552,6 +552,7 @@ class TestFailSoft:
 
     @pytest.mark.parametrize("bad_id", [
         "gid://shopify/Product/5",          # tipo sbagliato
+        "gid://shopify/Product/12345678901234",  # tipo sbagliato, coda numerica lunga
         "gid://shopify/Collection/",        # numero mancante
         "gid://shopify/Collection/12x",     # coda non numerica
         "gid://shopify/Collection/-5",
@@ -636,6 +637,33 @@ class TestFailSoft:
             client.build_product_collections_map()
         assert client._session.graphql_calls == []
         assert shopify_client_module.get_new_model_collections_status() is None
+
+
+class TestGidToInt:
+    @pytest.mark.parametrize("gid,kind,expected", [
+        ("gid://shopify/Collection/77690241136", "Collection", 77690241136),
+        ("gid://shopify/Product/9", "Product", 9),
+        ("gid://shopify/Collection/0", "Collection", 0),
+    ])
+    def test_valid(self, gid, kind, expected):
+        assert ShopifyClient._gid_to_int(gid, kind) == expected
+
+    @pytest.mark.parametrize("gid,kind", [
+        ("gid://shopify/Product/12345678901234", "Collection"),
+        ("gid://shopify/Collection/12345678901234", "Product"),
+        ("gid://shopify/Collection/", "Collection"),
+        ("gid://shopify/Collection/ 5", "Collection"),
+        ("gid://shopify/Collection/5 ", "Collection"),
+        ("gid://shopify/Collection/٣", "Collection"),
+        ("gid://shopify/Collection/5/6", "Collection"),
+        (" gid://shopify/Collection/5", "Collection"),
+        ("", "Collection"),
+        (None, "Collection"),
+        (5, "Collection"),
+    ])
+    def test_invalid_raises(self, gid, kind):
+        with pytest.raises(ValueError):
+            ShopifyClient._gid_to_int(gid, kind)
 
 
 # --- Log ------------------------------------------------------------------------
