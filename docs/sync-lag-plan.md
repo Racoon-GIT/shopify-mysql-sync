@@ -596,7 +596,7 @@ read clean**. That is the one error direction this watchdog cannot have.
 | Live refusal on `checked` | **done** 2026-09-23 and again 2026-09-25: `?hours=168` → `ok:false, checked:false, inconclusive/page_cap_reached` |
 | Live read of the last sync run | **done** 2026-09-25, after the fix: `last_sync_source: scheduler_job_logs`, `last_sync_utc 2026-09-25T01:00:03Z`, equal to the sync job's `lastRun` |
 | Scheduler job and its three rules, each seen firing | **done** 2026-09-25 (§Live receipts) |
-| Live `lag` / `drift` | **not taken**. Named gap G1, with its closing condition |
+| Live `lag` | **done** 2026-11-13 13:00 Rome, a real occurrence (G1 receipt below). Live `drift`: not seen |
 
 The mutations attack what was actually argued over, not what was easy:
 - `ok` forced true on the success path;
@@ -661,7 +661,7 @@ the watchdog sends belongs in that class.
 
 ### Named gaps
 
-- **G1: `lag` and `drift` have never fired live.** The measurement of 2026-09-23 found:
+- **G1: `lag` and `drift` have never fired live.** **CLOSED for `lag` on 2026-11-13** (receipt below); `drift` has still never been seen live. The measurement of 2026-09-23 found:
   - 0 variants absent from the mirror and 0 price drift over 168 h;
   - only 4 new variants in 30 days, all on one day;
   - and the endpoint takes one input, `?hours=`, which cannot force either verdict.
@@ -672,6 +672,31 @@ the watchdog sends belongs in that class.
   **Closing condition: the first real occurrence.** That is a job run with `checked:true` and `lag_count` or
   `drift_count` > 0, a `$.ok` alert in `scheduler_alert_history`, and its body kept. The same run is the first
   live read of `stock` / `sku_root`, because a clean run never queries them.
+
+  **Receipt, 2026-11-13 (read-only, one `READ ONLY` transaction on `racoon`; raw output kept in the session
+  scratchpad, the body is reproduced here because `scheduler_job_logs` keeps only the last 100 runs of this job, ~7 days).**
+  - `scheduler_job_logs` `596c143d-b4fe-452c-a2ea-42dbfb863b59`, job `f5798d47-…`, `executed_at` 2026-11-13 12:00:08Z
+    (13:00 Rome), `status success`, `status_code 200`, `duration 5424` ms, `error NULL`; body 652 bytes,
+    SHA-256 `a45e2cab2fa84999b71fe9e2a0e1a0009d8f582017549296a47b67422f00cc24`:
+
+    ```json
+    {"checked":true,"checked_at_rome":"2026-11-13 13:00:02","checked_at_utc":"2026-11-13T12:00:02Z","drift":[],"drift_count":0,"entries_truncated":false,"lag":[{"created_at_utc":"2026-11-13T11:28:43Z","oversell":false,"product_id":6554934968385,"product_title":"Nike AF1 Borchiate con borchie a cono","real_stock":0,"shopify_available":0,"size":"45","sku":"AF1-W-33PC-SIDE","variant_id":59934004707660}],"lag_count":1,"last_sync_source":"scheduler_job_logs","last_sync_utc":"2026-11-13T02:00:03Z","mirror_rows":9160,"ok":false,"oversell_count":0,"reason":null,"shopify_products_checked":82,"shopify_variants_checked":1227,"status":"lag","window_hours":48}
+    ```
+  - `scheduler_alert_history` `1c55221d-ad9d-45b2-97df-1ab8969da560`: `alert_id 24ce17cd-d117-4fab-b128-7250f4a99a1f`
+    (`$.status matches "lag|drift"`), `log_id` = the log above, `type response_match`, `sent_at` 2026-11-13 12:00:09Z,
+    `status sent`, `error NULL`, recipient `it-services@racoon-lab.it`. It is the only alert row for that log.
+  - The three runs before it (09:00, 10:00, 11:00Z) were `clean`, `lag_count 0`. The variant was created at 11:28:43Z,
+    after the last sync (02:00:03Z) and before this run: `lag`, as defined.
+  - First live read of `stock` / `sku_root`: `real_stock 0`, `shopify_available 0`, `oversell false`.
+  - **§4's open question, answered: the residual `available` was 0, cosmetic, not an oversell.** One occurrence, size 45
+    of a made-to-order shoe; it does not by itself change the "15 events a year" judgement.
+  - **Caveat: this is not the rule's first alert row.** `scheduler_alert_history` holds 7 rows for `24ce17cd`: 6 from
+    2026-09-25 .. 2026-10-08, all with `log_id NULL`, and this one. The six predate the rule's update of
+    2026-10-11 09:15:13Z, when its path was `$.ok eq false` (the first, 26 s after the rule's creation, matches the S4 exercise of 2026-09-25). Their bodies
+    are gone with the log retention, so nothing can say what they reported. This is the first alert **under the
+    current `$.status` rule**, and the first whose body is known to be a `lag`.
+  - Still to confirm, after the 03:00 Rome sync of 2026-11-14: that the 08:00 run reports `lag_count 0` for variant
+    `59934004707660` (TRACKER `Next`). Not part of the closing condition.
 - **G2: documented, not measured.**
   - Measured: SELECT on `scheduler_*` is proven live (S2, 2026-09-25).
   - Measured: `SHOW GRANTS FOR 'RacAdmin'@'%'` → `ALL PRIVILEGES ON racoon.*`, with `partial_revokes` OFF (2026-09-23).
