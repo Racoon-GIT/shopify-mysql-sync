@@ -695,8 +695,20 @@ the watchdog sends belongs in that class.
     2026-10-11 09:15:13Z, when its path was `$.ok eq false` (the first, 26 s after the rule's creation, matches the S4 exercise of 2026-09-25). Their bodies
     are gone with the log retention, so nothing can say what they reported. This is the first alert **under the
     current `$.status` rule**, and the first whose body is known to be a `lag`.
-  - Still to confirm, after the 03:00 Rome sync of 2026-11-14: that the 08:00 run reports `lag_count 0` for variant
-    `59934004707660` (TRACKER `Next`). Not part of the closing condition.
+  - **Cleared by the next sync, read 2026-11-15 (read-only).** First run after the 03:00 Rome sync of 2026-11-14:
+    `scheduler_job_logs` `4f714ed0-c57f-430b-b4e7-a37e1f9358ad`, `executed_at` 2026-11-14 07:00:06Z (08:00 Rome),
+    `success` / 200, body verbatim:
+
+    ```json
+    {"checked":true,"checked_at_rome":"2026-11-14 08:00:03","checked_at_utc":"2026-11-14T07:00:03Z","drift":[],"drift_count":0,"entries_truncated":false,"lag":[],"lag_count":0,"last_sync_source":"scheduler_job_logs","last_sync_utc":"2026-11-14T02:00:02Z","mirror_rows":9161,"ok":true,"oversell_count":0,"reason":null,"shopify_products_checked":82,"shopify_variants_checked":1248,"status":"clean","window_hours":48}
+    ```
+
+    `mirror_rows` went 9160 → 9161, consistent with the variant entering the mirror (an inference, not a per-row check).
+    All 22 runs from that one to 2026-11-15 14:00Z are `clean`, with `lag_count`, `drift_count` and `oversell_count` 0;
+    none of the 22 responses contains `59934004707660` (`LOCATE`), while the last run before the sync (2026-11-13 20:00Z)
+    does. A clean run means "not lagging now", not "never lagged". From 2026-11-15 08:00Z the window shrinks to 14-25
+    products, so later clean runs say nothing about this variant: the 07:00Z run of 11-14 is the proof. The G1 follow-up
+    is closed. The self-armed session cron was not needed.
 - **G2: documented, not measured.**
   - Measured: SELECT on `scheduler_*` is proven live (S2, 2026-09-25).
   - Measured: `SHOW GRANTS FOR 'RacAdmin'@'%'` → `ALL PRIVILEGES ON racoon.*`, with `partial_revokes` OFF (2026-09-23).
