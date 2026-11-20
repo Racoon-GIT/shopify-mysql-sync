@@ -7,7 +7,7 @@
      - Keep "Tried & discarded" entries while still relevant: they prevent re-proposing dead ends. -->
 
 ## Current state
-Pipeline: build · item: new-model collections pass (A1) · plan: IT/SVILUPPO/docs/shopify-api-2026-10/plan.md · gate-1: Ale 2026-11-05 (GATE:1+xproj, 55e28ff, recorded in that PROGRAM.md) · gate-2: pending
+Pipeline: build · item: new-model collections pass (A1) · plan: docs/new-model-collections-plan.md · gate-1: Ale 2026-11-05 (GATE:1+xproj, programme plan rev. 2.1 55e28ff) · gate-2: mutate-verify 5/5 PASS on 377489d clean-tree (docs/gate-2-log.md); GATE:2+push Ale 2026-11-20 (programme PROGRAM.md c178f93)
 
 **Phase**: the daily sync runs in production on Render (`shopify-sync-ws`, FREE, Frankfurt, 03:00 Rome). The sync-lag watchdog is live and watched.
 - Scheduler job `f5798d47-49bf-4fc2-bd00-3967af175293` `Shopify-MySQL-Sync_LagCheck`: cron `0 8-21 * * *` Europe/Rome, `?hours=48`, timeout 60 s.
